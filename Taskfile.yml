@@ -1,0 +1,87 @@
+version: "3"
+
+# Usage: task <name> [VAR=value ...]   e.g. task run COMP=titanic EXP=exp002
+# Run `task --list` to see all tasks.
+
+vars:
+  EXP: '{{.EXP | default "exp001"}}'
+
+tasks:
+  default:
+    cmds:
+      - task --list
+    silent: true
+
+  setup:
+    desc: Install dependencies into .venv
+    cmds:
+      - uv sync
+
+  lint:
+    desc: Lint with ruff
+    cmds:
+      - uv run ruff check .
+
+  format:
+    desc: Format and auto-fix with ruff
+    cmds:
+      - uv run ruff format .
+      - uv run ruff check --fix .
+
+  new-comp:
+    desc: "Create a competition directory (COMP=<slug>)"
+    requires:
+      vars: [COMP]
+    cmds:
+      - scripts/new_comp.sh {{.COMP}}
+
+  new-exp:
+    desc: "Copy the latest experiment to the next number (COMP=<slug> [FROM=expXXX])"
+    requires:
+      vars: [COMP]
+    cmds:
+      - scripts/new_exp.sh {{.COMP}} {{.FROM}}
+
+  download:
+    desc: "Download competition data to data/<COMP> (COMP=<slug>)"
+    requires:
+      vars: [COMP]
+    cmds:
+      - uv run scripts/download.sh {{.COMP}}
+
+  run:
+    desc: "Run an experiment locally (COMP=<slug> [EXP=exp001] [-- extra args])"
+    requires:
+      vars: [COMP]
+    cmds:
+      - uv run python competitions/{{.COMP}}/exp/{{.EXP}}/train.py {{.CLI_ARGS}}
+
+  debug:
+    desc: "Run an experiment with --debug (COMP=<slug> [EXP=exp001])"
+    requires:
+      vars: [COMP]
+    cmds:
+      - task: run
+        vars: { COMP: "{{.COMP}}", EXP: "{{.EXP}}", CLI_ARGS: "--debug {{.CLI_ARGS}}" }
+
+  submit:
+    desc: "Submit outputs/<COMP>/<EXP>/submission.csv (COMP=<slug> [EXP=exp001] [MSG=...])"
+    requires:
+      vars: [COMP]
+    vars:
+      MSG: '{{.MSG | default .EXP}}'
+    cmds:
+      - uv run kaggle competitions submit -c {{.COMP}} -f outputs/{{.COMP}}/{{.EXP}}/submission.csv -m "{{.MSG}}"
+
+  submissions:
+    desc: "Show recent submissions (COMP=<slug>)"
+    requires:
+      vars: [COMP]
+    cmds:
+      - uv run kaggle competitions submissions -c {{.COMP}}
+
+  colab:
+    desc: Print the Colab URL of the runner notebook
+    cmds:
+      - echo "https://colab.research.google.com/github/Moriyuki-S/kaggle_ws/blob/main/notebooks/colab_runner.ipynb"
+    silent: true

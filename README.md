@@ -67,6 +67,22 @@ git add -A && git commit -m "titanic exp001" && git push
 scripts/new_exp.sh titanic   # copies exp001 -> exp002
 ```
 
+## Task shortcuts (local only)
+
+[Task](https://taskfile.dev) (`brew install go-task`) wraps the commands above. Colab does not use it; the notebook calls `scripts/` and `train.py` directly.
+
+```bash
+task                                   # list tasks
+task new-comp COMP=titanic
+task new-exp  COMP=titanic             # exp001 -> exp002
+task download COMP=titanic
+task debug    COMP=titanic EXP=exp002
+task run      COMP=titanic EXP=exp002 -- --seed 0   # extra args after --
+task submit   COMP=titanic EXP=exp002 MSG="lgbm baseline"
+task lint / task format
+task colab                             # print the Colab URL
+```
+
 ## Colab first-time setup
 
 Register these in the 🔑 Secrets sidebar and enable notebook access:
