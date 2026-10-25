@@ -1,75 +1,75 @@
 # kaggle_ws
 
-ローカルでコードを書き、GitHub に push し、Colab で clone して実行する Kaggle 用ワークスペース。
+Kaggle workspace: write code locally, push to GitHub, then clone and run it on Colab.
 
-## ディレクトリ構成
+## Layout
 
 ```
 kaggle_ws/
-├── src/kaggle_ws/          # コンペ共通のユーティリティ (pip install -e . で import 可能)
-│   ├── paths.py            #   ローカル / Colab / Kaggle でデータ・出力パスを自動切替
-│   └── utils.py            #   seed_everything, timer など
+├── src/kaggle_ws/          # shared utilities (importable after `pip install -e .`)
+│   ├── paths.py            #   resolves data / output paths for local, Colab and Kaggle
+│   └── utils.py            #   seed_everything, timer, ...
 ├── competitions/
-│   ├── _template/          # 新コンペ用のひな形
+│   ├── _template/          # skeleton for a new competition
 │   └── <competition>/
-│       ├── README.md       #   概要・実験ログ (CV / LB)
-│       ├── notebooks/      #   EDA 用
+│       ├── README.md       #   overview and experiment log (CV / LB)
+│       ├── notebooks/      #   EDA
 │       └── exp/
 │           ├── exp001/train.py
 │           └── exp002/train.py
 ├── notebooks/
-│   └── colab_runner.ipynb  # Colab 実行用テンプレート
+│   └── colab_runner.ipynb  # Colab runner template
 ├── scripts/
-│   ├── new_comp.sh         # コンペディレクトリ作成
-│   ├── new_exp.sh          # 実験ディレクトリを複製して番号 +1
-│   └── download.sh         # kaggle CLI でデータ取得・解凍
-├── data/                   # (git 管理外) ローカル用データ
-└── outputs/                # (git 管理外) ローカル用出力
+│   ├── new_comp.sh         # create a competition directory
+│   ├── new_exp.sh          # copy the latest experiment and bump the number
+│   └── download.sh         # download and unzip data with the Kaggle CLI
+├── data/                   # (git-ignored) local data
+└── outputs/                # (git-ignored) local outputs
 ```
 
-- 1 実験 = 1 ディレクトリ。過去の実験は書き換えずにコピーして次へ進む (再現性のため)。
-- コンペ名・実験名はディレクトリ名から自動で決まり、出力は `outputs/<competition>/<exp>/` に保存される。
-- Colab では出力先が `MyDrive/kaggle/outputs/<competition>/<exp>/` になる (Drive をマウントした場合)。
+- One experiment = one directory. Don't edit past experiments; copy them to start the next one (reproducibility).
+- Competition and experiment names are derived from the directory names, and outputs go to `outputs/<competition>/<exp>/`.
+- On Colab, outputs go to `MyDrive/kaggle/outputs/<competition>/<exp>/` when Google Drive is mounted.
 
-## ローカルのセットアップ
+## Local setup
 
 ```bash
-uv sync                      # .venv 作成 + 依存インストール (kaggle CLI 含む)
-source .venv/bin/activate    # または各コマンドの頭に `uv run` を付ける
+uv sync                      # create .venv and install dependencies (including the Kaggle CLI)
+source .venv/bin/activate    # or prefix each command with `uv run`
 ```
 
-Kaggle API の認証 (どちらか):
+Kaggle API authentication (either one):
 
-- 新方式: Kaggle > Settings > API > **Generate New Token** → `export KAGGLE_API_TOKEN=...` (または `~/.kaggle/access_token` に保存)
-- 旧方式: **Create Legacy API Key** で落ちる `kaggle.json` を `~/.kaggle/kaggle.json` に置き `chmod 600`
+- New: Kaggle > Settings > API > **Generate New Token**, then `export KAGGLE_API_TOKEN=...` (or save it to `~/.kaggle/access_token`)
+- Legacy: put the `kaggle.json` from **Create Legacy API Key** at `~/.kaggle/kaggle.json` and `chmod 600` it
 
 ```bash
-kaggle competitions list     # 動作確認
+kaggle competitions list     # check that it works
 ```
 
-## 使い方
+## Usage
 
 ```bash
-# 1. コンペを作成 (先に Kaggle のコンペページでルールに同意しておく)
+# 1. Create a competition directory (accept the competition rules on Kaggle first)
 scripts/new_comp.sh titanic
 
-# 2. ローカルにデータを落として小さく動作確認 (任意)
+# 2. Optionally download the data and do a quick local check
 scripts/download.sh titanic
 uv run python competitions/titanic/exp/exp001/train.py --debug
 
-# 3. push
+# 3. Push
 git add -A && git commit -m "titanic exp001" && git push
 
-# 4. Colab で notebooks/colab_runner.ipynb を開き、設定セルを書き換えて上から実行
-#    (GitHub から直接開く: https://colab.research.google.com/github/Moriyuki-S/kaggle_ws/blob/main/notebooks/colab_runner.ipynb)
+# 4. Open notebooks/colab_runner.ipynb on Colab, edit the settings cell, and run all cells
+#    https://colab.research.google.com/github/Moriyuki-S/kaggle_ws/blob/main/notebooks/colab_runner.ipynb
 
-# 次の実験
-scripts/new_exp.sh titanic   # exp001 -> exp002 にコピー
+# Next experiment
+scripts/new_exp.sh titanic   # copies exp001 -> exp002
 ```
 
-## Colab の初回設定
+## Colab first-time setup
 
-左サイドバーの 🔑 シークレットに登録し、ノートブックからのアクセスを ON にする:
+Register these in the 🔑 Secrets sidebar and enable notebook access:
 
-- `KAGGLE_API_TOKEN` (旧方式なら `KAGGLE_USERNAME` と `KAGGLE_KEY`)
-- `GITHUB_TOKEN`: private リポジトリの場合のみ (Fine-grained PAT、Contents: Read-only)
+- `KAGGLE_API_TOKEN` (or `KAGGLE_USERNAME` and `KAGGLE_KEY` for the legacy key)
+- `GITHUB_TOKEN`: only for private repos (fine-grained PAT, Contents: Read-only)
