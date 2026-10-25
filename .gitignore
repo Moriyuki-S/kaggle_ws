@@ -1,0 +1,24 @@
+# Python-generated files
+__pycache__/
+*.py[oc]
+build/
+dist/
+wheels/
+*.egg-info
+
+# Virtual environments
+.venv
+
+# Kaggle
+data/
+outputs/
+*.zip
+kaggle.json
+access_token
+.env
+
+# Editor / OS
+.DS_Store
+.ipynb_checkpoints/
+.vscode/
+.idea/
