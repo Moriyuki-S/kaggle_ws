@@ -1,0 +1,20 @@
+{
+  "id": "hotcoffee012/gemma-4-lora-train-exp002",
+  "title": "gemma-4-lora-train-exp002",
+  "code_file": "train.py",
+  "language": "python",
+  "kernel_type": "script",
+  "is_private": true,
+  "enable_gpu": true,
+  "enable_tpu": false,
+  "enable_internet": false,
+  "dataset_sources": [
+    "metric/gemma-4-developer-agent-wheelhouse",
+    "dmitriigluzdov/gemma-4-serving-and-lora-verification-kit"
+  ],
+  "kernel_sources": [],
+  "competition_sources": ["gemma-4-developer-agent"],
+  "model_sources": ["google/gemma-4/Transformers/gemma-4-31b-it/1"],
+  "docker_image": "gcr.io/kaggle-private-byod/python@sha256:37c64f7dd9c54116ecd1bcc88817c5469b88387388fade02bfa8bf3fc647d461",
+  "machine_shape": "NvidiaL4"
+}

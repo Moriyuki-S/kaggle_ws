@@ -1,0 +1,6 @@
+# About 120 tasks share 12 hours, so the mean must stay under ~350 s per task.
+evaluation:
+  timeout_seconds: 240
+  max_tool_calls: 28
+  max_time_minutes: 8
+  max_turns: 80

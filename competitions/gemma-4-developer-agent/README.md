@@ -1,0 +1,49 @@
+# gemma-4-developer-agent
+
+- URL: https://www.kaggle.com/competitions/gemma-4-developer-agent
+- Metric: resolution rate (share of tasks whose hidden tests pass after applying the patch)
+- Deadline: entry and team merger 2026-11-25, final submission 2026-12-02 (23:59 UTC)
+
+## Layout
+
+```
+gemma-4-developer-agent/
+├── README.md        # overview and experiment log
+├── notebooks/       # throwaway notebooks (EDA etc.)
+└── exp/
+    └── exp001/      # one experiment = one directory (copy to start the next)
+        ├── build_submission.py  # validates submission/ and writes outputs/<exp>/submission.zip
+        └── submission/          # agent config that is zipped
+```
+
+New experiment: `scripts/new_exp.sh gemma-4-developer-agent` (copies the latest exp and bumps the number)
+
+## Experiment log
+
+| exp | description | CV | Public LB | notes |
+|-----|-------------|----|-----------|-------|
+| exp001 | 31B single agent, no LoRA, no graph tools, 8 min / 28 calls | | | |
+| exp002 | Kaggle L4x4 memory and speed test for LoRA training (bf16); 12k context ran out of memory | | | smoke only |
+| exp003 | Colab LoRA training (nf4, r=16, alpha=16, native + external A) | | | |
+
+## Setup
+
+The harness packages are not on PyPI. They come from the `metric/gemma-4-developer-agent-wheelhouse` dataset.
+
+```bash
+uv venv --python 3.13 .venv
+W=data/harness_wheels
+uv pip install --python .venv/bin/python $W/adk_submission-*.whl $W/adk_eval_core-*.whl litellm pandas networkx cachetools python-dotenv
+uv pip install --python .venv/bin/python --no-deps $W/swegemma-*.whl
+.venv/bin/python exp/exp001/build_submission.py
+```
+
+## LoRA training on Colab (exp003)
+
+Use `notebooks/colab_runner.ipynb` on an A100 runtime with `KAGGLE_API_TOKEN` in Colab Secrets:
+
+- `COMPETITION = "gemma-4-developer-agent"`, `EXP = "exp003"`
+- `DOWNLOAD = False`, `REQUIRE_SUBMISSION = False`
+- `ARGS = "--smoke"` first, then `ARGS = "--max-context 6144 --time-limit-hours 10"`
+
+Running again resumes from `checkpoint.pt` on Drive. Training data comes from `dmitriigluzdov/gemma-4-serving-and-lora-verification-kit` (CC BY 4.0).
