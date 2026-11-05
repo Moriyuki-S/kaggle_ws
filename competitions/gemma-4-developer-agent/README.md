@@ -40,10 +40,8 @@ uv pip install --python .venv/bin/python --no-deps $W/swegemma-*.whl
 
 ## LoRA training on Colab (exp003)
 
-Use `notebooks/colab_runner.ipynb` on an A100 runtime with `KAGGLE_API_TOKEN` in Colab Secrets:
+Use `notebooks/colab_runner.ipynb` on an A100 runtime with `KAGGLE_API_TOKEN` in Colab Secrets. Set `COMPETITION = "gemma-4-developer-agent"` and `EXP = "exp003"`, then run all. The default arguments train with `--max-context 6144 --time-limit-hours 10`; use `ARGS = "--smoke"` to measure speed and memory only.
 
-- `COMPETITION = "gemma-4-developer-agent"`, `EXP = "exp003"`
-- `DOWNLOAD = False`, `REQUIRE_SUBMISSION = False`
-- `ARGS = "--smoke"` first, then `ARGS = "--max-context 6144 --time-limit-hours 10"`
+The `.skip_download` file stops the runner from downloading the full competition data (about 22 GB), so `train.py` fetches only what it needs.
 
 Running again resumes from `checkpoint.pt` on Drive. Training data comes from `dmitriigluzdov/gemma-4-serving-and-lora-verification-kit` (CC BY 4.0).

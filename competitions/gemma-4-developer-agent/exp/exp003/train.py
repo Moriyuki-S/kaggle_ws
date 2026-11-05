@@ -3,7 +3,7 @@
 The checkpoint is loaded in nf4 so that it fits one GPU; the adapter is served later on the
 official QAT checkpoint through vLLM. Progress is checkpointed so a new session can resume.
 
-Run through notebooks/colab_runner.ipynb with DOWNLOAD and REQUIRE_SUBMISSION off.
+Run through notebooks/colab_runner.ipynb. This script downloads only the files it needs.
 
 Data: dmitriigluzdov/gemma-4-serving-and-lora-verification-kit (CC BY 4.0).
 """
