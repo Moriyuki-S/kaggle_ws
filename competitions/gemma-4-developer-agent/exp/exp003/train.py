@@ -37,8 +37,8 @@ WARMUP_STEPS = 5
 CHECKPOINT_EVERY = 5
 EVAL_EVERY = 25
 VAL_REPO_FRACTION = 0.1
-MAX_VAL_STEPS = 32
-SMOKE_LENGTHS = (2048, 4096, 6144, 8192)
+MAX_VAL_STEPS = 16
+SMOKE_LENGTHS = (3072, 4096, 5120, 6144, 8192)
 
 SERVED_MODEL = "gemma-4-31b-it-qat-w4a16-ct"
 KEY_PREFIX = "base_model.model.model.language_model."
@@ -156,7 +156,8 @@ def split_by_repo(steps):
     train = [s for s in steps if s["repo"] not in held_out]
     val = [s for s in steps if s["repo"] in held_out]
     random.Random(SEED).shuffle(train)
-    random.Random(SEED).shuffle(val)
+    # The shortest steps keep validation within memory on a 22 GiB GPU, where an OOM would be fatal.
+    val.sort(key=lambda s: len(s["prompt"]) + len(s["target"]))
     return train, val[:MAX_VAL_STEPS]
 
 
@@ -291,7 +292,9 @@ def main() -> None:
     context = 8192 if args.smoke else args.max_context
     steps = load_steps(args.model_dir, args.data_dir, context)
     train, val = split_by_repo(steps)
+    longest_val = max((len(s["prompt"]) + len(s["target"]) for s in val), default=0)
     print(f"steps: {len(steps)} train={len(train)} val={len(val)}", flush=True)
+    print(f"longest validation step: {longest_val} tokens", flush=True)
 
     model = load_model(args.model_dir)
     model.requires_grad_(False)
