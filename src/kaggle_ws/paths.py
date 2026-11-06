@@ -29,8 +29,8 @@ def get_paths(competition: str) -> Paths:
     elif is_colab():
         data = Path("/content/data") / competition
         # keep outputs on Google Drive if it is mounted
-        drive = Path("/content/drive/MyDrive/kaggle/outputs")
-        output = (drive if drive.parent.exists() else Path("/content/outputs")) / competition
+        drive = Path("/content/drive/MyDrive")
+        output = (drive / "kaggle/outputs" if drive.exists() else Path("/content/outputs")) / competition
     else:
         data = REPO_ROOT / "data" / competition
         output = REPO_ROOT / "outputs" / competition
