@@ -52,7 +52,7 @@ KIT = "dmitriigluzdov/gemma-4-serving-and-lora-verification-kit"
 KIT_FILES = ("lora_data.py", "lora_native_resolved.jsonl", "lora_external_A.jsonl")
 SAMPLE_ADAPTER = "sample_submission/adapters/main_lora/adapter_model.safetensors"
 PACKAGES = ("transformers==5.13.1", "bitsandbytes", "accelerate", "huggingface_hub", "six")
-MIN_GPU_GIB = 20
+MIN_GPU_GIB = 30
 MIN_DISK_GIB = 75
 
 
@@ -322,8 +322,13 @@ def main() -> None:
         return 0.5 * (1 + math.cos(math.pi * min(progress, 1.0)))
 
     update, skipped, history, best = 0, 0, [], None
+    state = None
     if checkpoint_path.exists():
         state = torch.load(checkpoint_path, map_location="cpu", weights_only=False)
+        if state["skipped"] >= state["update"] * GRAD_ACCUM:
+            print("ignoring a checkpoint in which every step was skipped", flush=True)
+            state = None
+    if state is not None:
         if state["max_context"] != args.max_context:
             raise ValueError(f"checkpoint used max_context={state['max_context']}")
         for param, saved in zip(params, state["params"], strict=True):
@@ -380,6 +385,8 @@ def main() -> None:
                 skipped += 1
                 torch.cuda.empty_cache()
                 print(f"skipped a step after OOM (total {skipped})", flush=True)
+        if seen == 0:
+            raise SystemExit(f"Every step of update {update + 1} ran out of memory: GPU too small.")
         for group in optimizer.param_groups:
             group["lr"] = LEARNING_RATE * lr_at(update)
         norm = torch.nn.utils.clip_grad_norm_(params, 1.0).item()

@@ -40,7 +40,7 @@ uv pip install --python .venv/bin/python --no-deps $W/swegemma-*.whl
 
 ## LoRA training on Colab (exp003)
 
-Use `notebooks/colab_runner.ipynb` on an A100 runtime with `KAGGLE_API_TOKEN` in Colab Secrets. Set `COMPETITION = "gemma-4-developer-agent"` and `EXP = "exp003"`, then run all. The default arguments train with `--max-context 6144 --time-limit-hours 10`; use `ARGS = "--smoke"` to measure speed and memory only. On L4 (22 GiB), run the smoke test first: it stops with an out-of-memory error at the first length that does not fit, so pass the longest length that passed as `--max-context`.
+Use `notebooks/colab_runner.ipynb` on an A100 runtime with `KAGGLE_API_TOKEN` in Colab Secrets. Set `COMPETITION = "gemma-4-developer-agent"` and `EXP = "exp003"`, then run all. The default arguments train with `--max-context 6144 --time-limit-hours 10`; use `ARGS = "--smoke"` to measure speed and memory only. L4 (22 GiB) is too small: every step of a real run ran out of memory, so the script refuses GPUs under 30 GiB.
 
 The `.skip_download` file stops the runner from downloading the full competition data (about 22 GB), so `train.py` fetches only what it needs.
 
