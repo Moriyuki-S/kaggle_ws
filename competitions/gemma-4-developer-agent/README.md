@@ -38,6 +38,14 @@ uv pip install --python .venv/bin/python --no-deps $W/swegemma-*.whl
 .venv/bin/python exp/exp001/build_submission.py
 ```
 
+## Validation on Colab
+
+`notebooks/colab_validate.ipynb` compares experiments on the public tasks without using a Kaggle submission. Select an A100 runtime, set `EXPS = "exp001,exp003"` (the first is the baseline), and run all. Keep `ARGS = "--num-tasks 2"` to check the setup, then clear it for 30 tasks.
+
+`validate.py` serves the official QAT model and every adapter with vLLM, then runs `swegemma eval --sandbox subprocess`. It takes limits from each `eval_config.yaml` and adapters from `<output>/<exp>/<adapter>` on Drive. Results go to `<output>/validate/seed<seed>/`, and running again skips finished tasks.
+
+Trust the difference between experiments rather than the absolute rate: this differs from scoring in GPU layout, network access, and memory limits. `psf/requests` tasks are excluded because their tests need `pytest-httpbin`, which the published wheels do not include.
+
 ## LoRA training on Colab (exp003)
 
 Use `notebooks/colab_runner.ipynb` on an A100 runtime with `KAGGLE_API_TOKEN` in Colab Secrets. Set `COMPETITION = "gemma-4-developer-agent"` and `EXP = "exp003"`, then run all. The default arguments train with `--max-context 6144 --time-limit-hours 10`; use `ARGS = "--smoke"` to measure speed and memory only. L4 (22 GiB) is too small: every step of a real run ran out of memory, so the script refuses GPUs under 30 GiB.

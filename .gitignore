@@ -22,3 +22,4 @@ access_token
 .ipynb_checkpoints/
 .vscode/
 .idea/
+competitions/*/exp/*/submission/adapters/
