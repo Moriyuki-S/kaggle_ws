@@ -42,7 +42,7 @@ uv pip install --python .venv/bin/python --no-deps $W/swegemma-*.whl
 
 `notebooks/colab_validate.ipynb` compares experiments on the public tasks without using a Kaggle submission. Select an A100 runtime, set `EXPS = "exp001,exp003"` (the first is the baseline), and run all. Keep `ARGS = "--num-tasks 2"` to check the setup, then clear it for 30 tasks.
 
-`validate.py` serves the official QAT model and every adapter with vLLM, then runs `swegemma eval --sandbox subprocess`. It takes limits from each `eval_config.yaml` and adapters from `<output>/<exp>/<adapter>` on Drive. Results go to `<output>/validate/seed<seed>/`, and running again skips finished tasks.
+`validate.py` serves the official QAT model and every adapter with vLLM, then runs `swegemma eval --sandbox subprocess`. It takes limits from each `eval_config.yaml`. Upload each adapter to Drive as `MyDrive/kaggle/models/gemma-4-developer-agent/<exp>/<adapter>.zip` (or as that folder unzipped); a training run's output in `MyDrive/kaggle/outputs/gemma-4-developer-agent/<exp>/<adapter>` also works. Results go to `<output>/validate/seed<seed>/`, and running again skips finished tasks.
 
 Trust the difference between experiments rather than the absolute rate: this differs from scoring in GPU layout, network access, and memory limits. `psf/requests` tasks are excluded because their tests need `pytest-httpbin`, which the published wheels do not include.
 

@@ -18,6 +18,7 @@ import sys
 import time
 import urllib.error
 import urllib.request
+import zipfile
 from pathlib import Path
 
 import yaml
@@ -162,18 +163,45 @@ def declared(submission: Path, key: str) -> set[str]:
     return found
 
 
-def collect_adapters(exps: list[str], output: Path) -> dict[str, Path]:
-    """Adapters are not in git: copy each declared one from the experiment's output on Drive."""
+def install_adapter(sources: list[Path], target: Path) -> bool:
+    """Copy the first source that exists: a folder, or a zip holding the adapter files."""
+    for source in sources:
+        if (source / "adapter_model.safetensors").exists():
+            shutil.copytree(source, target, dirs_exist_ok=True)
+            return True
+        if source.with_suffix(".zip").is_file():
+            unpacked = target.with_name(f"{target.name}.unzipped")
+            shutil.rmtree(unpacked, ignore_errors=True)
+            zipfile.ZipFile(source.with_suffix(".zip")).extractall(unpacked)
+            weights = next(unpacked.rglob("adapter_model.safetensors"), None)
+            if weights is None:
+                raise SystemExit(f"{source.with_suffix('.zip')} has no adapter_model.safetensors.")
+            shutil.copytree(weights.parent, target, dirs_exist_ok=True)
+            shutil.rmtree(unpacked)
+            return True
+    return False
+
+
+def collect_adapters(exps: list[str], paths) -> dict[str, Path]:
+    """Adapters are not in git: take each declared one from Drive.
+
+    Upload to <Drive>/kaggle/models/<competition>/<exp>/<adapter>/ or <adapter>.zip there;
+    a training run's own output at <Drive>/kaggle/outputs/<competition>/<exp>/<adapter> also works.
+    """
+    models = paths.output.parents[1] / "models" / COMPETITION
     adapters: dict[str, Path] = {}
     for exp in exps:
         submission = COMPETITION_DIR / "exp" / exp / "submission"
         for name in declared(submission, "adapter"):
             target = submission / "adapters" / name
+            sources = [models / exp / name, paths.output / exp / name]
             if not (target / "adapter_model.safetensors").exists():
-                source = output / exp / name
-                if not (source / "adapter_model.safetensors").exists():
-                    raise SystemExit(f"{exp} declares adapter {name}, but {source} has no weights.")
-                shutil.copytree(source, target, dirs_exist_ok=True)
+                if not install_adapter(sources, target):
+                    places = ", ".join(f"{s}/ or {s}.zip" for s in sources)
+                    raise SystemExit(
+                        f"{exp} declares adapter {name}; upload it to one of: {places}"
+                    )
+            print(f"{exp}: adapter {name} ready", flush=True)
             if name in adapters:
                 raise SystemExit(f"Adapter name {name} is used by more than one experiment.")
             adapters[name] = target
@@ -363,7 +391,7 @@ def main() -> None:
 
     paths = get_paths(COMPETITION)
     root = paths.output / "validate" / f"seed{args.seed}"
-    adapters = collect_adapters(exps, paths.output)
+    adapters = collect_adapters(exps, paths)
 
     kaggle_file("tasks.jsonl", paths.data)
     sample = sample_tasks(paths.data / "tasks.jsonl", args.repos, args.num_tasks, args.seed)
