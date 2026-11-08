@@ -1,7 +1,9 @@
 """Compare experiments on the public tasks with the official harness on one Colab GPU.
 
-Run through notebooks/colab_validate.ipynb. One vLLM server serves the official QAT model and
-every adapter, then `swegemma eval` runs each experiment on the same sample of tasks.
+Run through notebooks/colab_validate.ipynb. Each sampled task is first run with its reference
+patch, and tasks that fail even then (the local sandbox lacks something the tests need) are
+replaced by the next ones. One vLLM server then serves the official QAT model and every
+adapter, and `swegemma eval` runs each experiment on the same tasks.
 Finished tasks are kept on Drive, so running again continues where it stopped.
 """
 
@@ -15,10 +17,12 @@ import re
 import shutil
 import subprocess
 import sys
+import threading
 import time
 import urllib.error
 import urllib.request
 import zipfile
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 import yaml
@@ -50,6 +54,10 @@ EVAL_PACKAGES = (
     "hatchling",
     "flit-core",
     "editables",
+    # fastapi tests import these, but the published wheels do not include them
+    "inline-snapshot",
+    "dirty-equals",
+    "orjson",
 )
 # requests tests need pytest-httpbin, which the published wheels do not include.
 DEFAULT_REPOS = ("fastapi/fastapi", "Textualize/rich")
@@ -64,6 +72,7 @@ MIN_DISK_GIB = 60
 PORT = 8000
 SERVER_TIMEOUT_SECONDS = 1800
 POLL_SECONDS = 30
+GOLD_BATCH = 8
 
 
 def run(*command) -> None:
@@ -90,12 +99,14 @@ def competition_files() -> list[str]:
         token = match.group(1)
 
 
-def prepare_data(data_dir: Path, task_ids: list[str]) -> None:
-    names = [name for name in competition_files() if name.startswith("wheels/")]
-    names += ["sandbox/setup.py"]
-    names += [f"snapshots/{task_id}.tgz" for task_id in task_ids]
+def download(names: list[str], data_dir: Path) -> None:
     with concurrent.futures.ThreadPoolExecutor(8) as pool:
         list(pool.map(lambda name: kaggle_file(name, data_dir), names))
+
+
+def prepare_data(data_dir: Path) -> None:
+    names = [name for name in competition_files() if name.startswith("wheels/")]
+    download([*names, "sandbox/setup.py"], data_dir)
 
 
 def prepare_machine(model: str, data_dir: Path) -> tuple[Path, Path, Path]:
@@ -247,13 +258,13 @@ def start_server(
     raise SystemExit(f"vLLM was not ready in time:\n{log.read_text()[-3000:]}")
 
 
-def sample_tasks(tasks_path: Path, repos: list[str], count: int, seed: int) -> list[dict]:
-    """A larger count extends a smaller one, so earlier results stay in the sample."""
+def sample_tasks(tasks_path: Path, repos: list[str], seed: int) -> list[dict]:
+    """A fixed order, so that a larger count extends a smaller one."""
     rows = [json.loads(line) for line in tasks_path.read_text().splitlines()]
     rows = [row for row in rows if row["repo"] in repos]
     rows.sort(key=lambda row: row["instance_id"])
     random.Random(seed).shuffle(rows)
-    return rows[:count]
+    return rows
 
 
 def read_results(results_dir: Path) -> dict[str, dict]:
@@ -263,6 +274,121 @@ def read_results(results_dir: Path) -> dict[str, dict]:
             row = json.loads(line)
             results[row["instance_id"]] = row
     return results
+
+
+def eval_command(
+    eval_python: Path, tasks_path: Path, data_dir: Path, submission: Path, run_dir: Path, workers
+) -> list[str]:
+    limits = yaml.safe_load((submission / "eval_config.yaml").read_text())["evaluation"]
+    command = [
+        eval_python, COMPETITION_DIR / "swegemma_eval.py",
+        "--tasks", tasks_path,
+        # the harness looks for wheels and sandbox/setup.py next to the snapshots
+        "--snapshots-dir", data_dir / "snapshots",
+        "--submission-dir", submission,
+        "--results-dir", run_dir,
+        "--sandbox", "subprocess",
+        "--concurrency", workers,
+        "--display", "quiet",
+    ]  # fmt: skip
+    for key, flag in EVAL_FLAGS.items():
+        if key in limits:
+            command += [flag, limits[key]]
+    return [str(part) for part in command]
+
+
+def eval_env(port: int) -> dict[str, str]:
+    env = {**os.environ, "LOCAL_INFERENCE_URL": f"http://127.0.0.1:{port}/v1"}
+    env.pop("PYTHONPATH", None)
+    return env
+
+
+def gold_server(patch: str) -> ThreadingHTTPServer:
+    """A stand-in model that applies the reference patch, submits it, and stops."""
+
+    class Handler(BaseHTTPRequestHandler):
+        def log_message(self, *args) -> None:
+            pass
+
+        def do_POST(self) -> None:
+            body = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
+            turn = sum(message["role"] == "assistant" for message in body["messages"])
+            apply = f"cd /workspace && git apply <<'GOLD_PATCH'\n{patch}\nGOLD_PATCH"
+            calls = [("run_command", {"command": apply}), ("submit_patch", {})]
+            if turn < len(calls):
+                name, arguments = calls[turn]
+                function = {"name": name, "arguments": json.dumps(arguments)}
+                call = {"id": f"call{turn}", "type": "function", "function": function}
+                message, finish = (
+                    {"role": "assistant", "content": None, "tool_calls": [call]},
+                    "tool_calls",
+                )
+            else:
+                message, finish = {"role": "assistant", "content": "Done."}, "stop"
+            reply = {
+                "id": "gold",
+                "object": "chat.completion",
+                "created": 0,
+                "model": body["model"],
+                "choices": [{"index": 0, "message": message, "finish_reason": finish}],
+                "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
+            }
+            data = json.dumps(reply).encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(data)))
+            self.end_headers()
+            self.wfile.write(data)
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    return server
+
+
+def check_gold(eval_python: Path, task: dict, data_dir: Path, gold_dir: Path, submission) -> None:
+    run_dir = gold_dir / f"run_{task['instance_id']}"
+    shutil.rmtree(run_dir, ignore_errors=True)
+    run_dir.mkdir(parents=True)
+    tasks_path = run_dir / "tasks.jsonl"
+    tasks_path.write_text(json.dumps(task) + "\n")
+    server = gold_server(task["patch"])
+    try:
+        command = eval_command(eval_python, tasks_path, data_dir, submission, run_dir, 1)
+        with (run_dir / "eval.log").open("w") as log:
+            env = eval_env(server.server_address[1])
+            subprocess.run(command, stdout=log, stderr=subprocess.STDOUT, env=env, check=False)
+    finally:
+        server.shutdown()
+
+
+def select_tasks(eval_python, candidates, count, data_dir, gold_dir, submission, workers) -> list:
+    """Take candidates in order, keeping those whose reference patch passes locally."""
+    selected: list[dict] = []
+    excluded: list[str] = []
+    for start in range(0, len(candidates), GOLD_BATCH):
+        if len(selected) >= count:
+            break
+        batch = candidates[start : start + GOLD_BATCH]
+        download([f"snapshots/{t['instance_id']}.tgz" for t in batch], data_dir)
+        todo = [t for t in batch if t["instance_id"] not in read_results(gold_dir)]
+        with concurrent.futures.ThreadPoolExecutor(workers) as pool:
+            jobs = [
+                pool.submit(check_gold, eval_python, t, data_dir, gold_dir, submission)
+                for t in todo
+            ]
+            for job in jobs:
+                job.result()
+        gold = read_results(gold_dir)
+        for task in batch:
+            row = gold.get(task["instance_id"])
+            if row and row["resolved"]:
+                selected.append(task)
+            else:
+                excluded.append(task["instance_id"])
+        print(f"reference patches: {len(selected)} pass, {len(excluded)} fail", flush=True)
+    if excluded:
+        print(f"left out because the reference patch fails locally: {excluded}", flush=True)
+    return selected[:count]
 
 
 def evaluate_experiment(
@@ -279,31 +405,13 @@ def evaluate_experiment(
     tasks_path.write_text("".join(json.dumps(t) + "\n" for t in todo))
 
     submission = COMPETITION_DIR / "exp" / exp / "submission"
-    limits = yaml.safe_load((submission / "eval_config.yaml").read_text())["evaluation"]
-    command = [
-        eval_python, COMPETITION_DIR / "swegemma_eval.py",
-        "--tasks", tasks_path,
-        # the harness looks for wheels and sandbox/setup.py next to the snapshots
-        "--snapshots-dir", data_dir / "snapshots",
-        "--submission-dir", submission,
-        "--results-dir", run_dir,
-        "--sandbox", "subprocess",
-        "--concurrency", args.concurrency,
-        "--display", "quiet",
-    ]  # fmt: skip
-    for key, flag in EVAL_FLAGS.items():
-        if key in limits:
-            command += [flag, limits[key]]
-
-    env = {**os.environ, "LOCAL_INFERENCE_URL": f"http://127.0.0.1:{PORT}/v1"}
-    env.pop("PYTHONPATH", None)
+    command = eval_command(eval_python, tasks_path, data_dir, submission, run_dir, args.concurrency)
+    env = eval_env(PORT)
     log = run_dir / "eval.log"
     print(f"{exp}: {len(todo)} tasks, concurrency {args.concurrency}; log: {log}", flush=True)
     began = time.time()
     with log.open("w") as stream:
-        process = subprocess.Popen(
-            [str(part) for part in command], stdout=stream, stderr=subprocess.STDOUT, env=env
-        )
+        process = subprocess.Popen(command, stdout=stream, stderr=subprocess.STDOUT, env=env)
         seen = 0
         while process.poll() is None:
             time.sleep(POLL_SECONDS)
@@ -385,15 +493,20 @@ def main() -> None:
     model = models.pop()
 
     paths = get_paths(COMPETITION)
-    # v2: sessions compact old events as in scoring; earlier results ran without it
-    root = paths.output / "validate" / f"v2_seed{args.seed}"
+    # v3: reference-patch check and extra test packages; v2 compacted sessions as scoring does
+    root = paths.output / "validate" / f"v3_seed{args.seed}"
     adapters = collect_adapters(exps, paths.output)
 
     kaggle_file("tasks.jsonl", paths.data)
-    sample = sample_tasks(paths.data / "tasks.jsonl", args.repos, args.num_tasks, args.seed)
-    print(f"{len(sample)} tasks: {[t['instance_id'] for t in sample]}", flush=True)
-    prepare_data(paths.data, [t["instance_id"] for t in sample])
+    candidates = sample_tasks(paths.data / "tasks.jsonl", args.repos, args.seed)
+    prepare_data(paths.data)
     server_python, eval_python, model_dir = prepare_machine(model, paths.data)
+    submission = COMPETITION_DIR / "exp" / exps[0] / "submission"
+    sample = select_tasks(
+        eval_python, candidates, args.num_tasks, paths.data, root / "gold", submission,
+        args.concurrency,
+    )  # fmt: skip
+    print(f"{len(sample)} tasks: {[t['instance_id'] for t in sample]}", flush=True)
 
     for exp in exps:
         (root / exp).mkdir(parents=True, exist_ok=True)

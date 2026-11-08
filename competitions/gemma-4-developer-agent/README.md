@@ -46,7 +46,9 @@ On Colab, everything goes to `MyDrive/Colab Notebooks/Kaggle/gemma-4-developer-a
 
 `notebooks/colab_validate.ipynb` compares experiments on the public tasks without using a Kaggle submission. Select an A100 runtime, set `EXPS = "exp001,exp003"` (the first is the baseline), and run all. Keep `ARGS = "--num-tasks 2"` to check the setup, then clear it for 30 tasks.
 
-`validate.py` serves the official QAT model and every adapter with vLLM, then runs `swegemma eval --sandbox subprocess` through `swegemma_eval.py`, which adds the event compaction and prompt caching that scoring uses (without them, long sessions fail with `ContextWindowExceededError`). It takes limits from each `eval_config.yaml` and each adapter from `<exp>/<adapter>/` (or `<exp>/<adapter>.zip`) in the Drive folder. Results go to `validate/v2_seed<seed>/` in the Drive folder, and running again skips finished tasks.
+`validate.py` serves the official QAT model and every adapter with vLLM, then runs `swegemma eval --sandbox subprocess` through `swegemma_eval.py`, which adds the event compaction and prompt caching that scoring uses (without them, long sessions fail with `ContextWindowExceededError`). It takes limits from each `eval_config.yaml` and each adapter from `<exp>/<adapter>/` (or `<exp>/<adapter>.zip`) in the Drive folder. Results go to `validate/v3_seed<seed>/` in the Drive folder, and running again skips finished tasks.
+
+Before any model runs, each sampled task is run with its reference patch (a stand-in model applies it), and tasks that fail even then are replaced by the next ones: the local sandbox lacks some test dependencies of the official image (for example `inline_snapshot`, or the `pygments` version that `rich` tests expect).
 
 Trust the difference between experiments rather than the absolute rate: this differs from scoring in GPU layout, network access, and memory limits. `psf/requests` tasks are excluded because their tests need `pytest-httpbin`, which the published wheels do not include.
 
