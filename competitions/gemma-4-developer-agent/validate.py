@@ -182,23 +182,20 @@ def install_adapter(sources: list[Path], target: Path) -> bool:
     return False
 
 
-def collect_adapters(exps: list[str], paths) -> dict[str, Path]:
-    """Adapters are not in git: take each declared one from Drive.
+def collect_adapters(exps: list[str], output: Path) -> dict[str, Path]:
+    """Adapters are not in git: take each declared one from <output>/<exp>/ on Drive.
 
-    Upload to <Drive>/kaggle/models/<competition>/<exp>/<adapter>/ or <adapter>.zip there;
-    a training run's own output at <Drive>/kaggle/outputs/<competition>/<exp>/<adapter> also works.
+    A training run writes the adapter folder there; an uploaded <adapter>.zip also works.
     """
-    models = paths.output.parents[1] / "models" / COMPETITION
     adapters: dict[str, Path] = {}
     for exp in exps:
         submission = COMPETITION_DIR / "exp" / exp / "submission"
         for name in declared(submission, "adapter"):
             target = submission / "adapters" / name
-            sources = [models / exp / name, paths.output / exp / name]
+            source = output / exp / name
             ready = (target / "adapter_model.safetensors").exists()
-            if not ready and not install_adapter(sources, target):
-                places = ", ".join(f"{s}/ or {s}.zip" for s in sources)
-                raise SystemExit(f"{exp} declares adapter {name}; upload it to one of: {places}")
+            if not ready and not install_adapter([source], target):
+                raise SystemExit(f"{exp} declares adapter {name}: upload {source}/ or {source}.zip")
             print(f"{exp}: adapter {name} ready", flush=True)
             if name in adapters:
                 raise SystemExit(f"Adapter name {name} is used by more than one experiment.")
@@ -389,7 +386,7 @@ def main() -> None:
 
     paths = get_paths(COMPETITION)
     root = paths.output / "validate" / f"seed{args.seed}"
-    adapters = collect_adapters(exps, paths)
+    adapters = collect_adapters(exps, paths.output)
 
     kaggle_file("tasks.jsonl", paths.data)
     sample = sample_tasks(paths.data / "tasks.jsonl", args.repos, args.num_tasks, args.seed)

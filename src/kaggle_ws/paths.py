@@ -21,6 +21,20 @@ class Paths:
     output: Path
 
 
+def colab_output(competition: str) -> Path:
+    """Keep outputs on Google Drive if it is mounted.
+
+    competitions/<competition>/.drive_dir can name the folder, relative to My Drive.
+    """
+    drive = Path("/content/drive/MyDrive")
+    if not drive.exists():
+        return Path("/content/outputs") / competition
+    setting = REPO_ROOT / "competitions" / competition / ".drive_dir"
+    if setting.exists():
+        return drive / setting.read_text().strip()
+    return drive / "kaggle/outputs" / competition
+
+
 def get_paths(competition: str) -> Paths:
     """DATA_DIR / OUTPUT_DIR env vars take precedence."""
     if is_kaggle():
@@ -28,9 +42,7 @@ def get_paths(competition: str) -> Paths:
         output = Path("/kaggle/working")
     elif is_colab():
         data = Path("/content/data") / competition
-        # keep outputs on Google Drive if it is mounted
-        drive = Path("/content/drive/MyDrive")
-        output = (drive / "kaggle/outputs" if drive.exists() else Path("/content/outputs")) / competition
+        output = colab_output(competition)
     else:
         data = REPO_ROOT / "data" / competition
         output = REPO_ROOT / "outputs" / competition
