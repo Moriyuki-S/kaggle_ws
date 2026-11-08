@@ -5,6 +5,8 @@ from dataclasses import dataclass
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
+MY_DRIVE = Path("/content/drive/MyDrive")
+DEFAULT_DRIVE_ROOT = "Colab Notebooks/Kaggle"
 
 
 def is_colab() -> bool:
@@ -21,6 +23,17 @@ class Paths:
     output: Path
 
 
+def drive_root() -> Path:
+    """The folder in My Drive that holds one folder per competition, named after it.
+
+    DRIVE_ROOT overrides the default and may also be written as a full or "My Drive/" path.
+    """
+    folder = os.environ.get("DRIVE_ROOT", DEFAULT_DRIVE_ROOT).strip().strip("/")
+    for prefix in ("content/drive/MyDrive/", "My Drive/", "マイドライブ/"):
+        folder = folder.removeprefix(prefix)
+    return MY_DRIVE / folder
+
+
 def get_paths(competition: str) -> Paths:
     """DATA_DIR / OUTPUT_DIR env vars take precedence."""
     if is_kaggle():
@@ -29,8 +42,7 @@ def get_paths(competition: str) -> Paths:
     elif is_colab():
         data = Path("/content/data") / competition
         # keep outputs on Google Drive if it is mounted
-        drive = Path("/content/drive/MyDrive")
-        output = (drive / "kaggle/outputs" if drive.exists() else Path("/content/outputs")) / competition
+        output = (drive_root() if MY_DRIVE.exists() else Path("/content/outputs")) / competition
     else:
         data = REPO_ROOT / "data" / competition
         output = REPO_ROOT / "outputs" / competition

@@ -40,7 +40,7 @@ uv pip install --python .venv/bin/python --no-deps $W/swegemma-*.whl
 
 ## Drive folder
 
-The validation notebook's `DRIVE_DIR` option names the competition's folder in My Drive (`Colab Notebooks/Kaggle/2026_Gemma4`): `<exp>/` holds a training run's checkpoint, metrics and adapters, and `validate/` holds validation results.
+On Colab, everything goes to `MyDrive/Colab Notebooks/Kaggle/gemma-4-developer-agent/`: `<exp>/` holds a training run's checkpoint, metrics and adapters, and `validate/` holds validation results.
 
 ## Validation on Colab
 

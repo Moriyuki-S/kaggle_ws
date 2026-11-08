@@ -18,7 +18,8 @@ kaggle_ws/
 │           ├── exp001/train.py
 │           └── exp002/train.py
 ├── notebooks/
-│   └── colab_runner.ipynb  # Colab runner template
+│   ├── colab_runner.ipynb  # Colab runner template
+│   └── colab_validate.ipynb  # Colab validation template (runs competitions/<comp>/validate.py)
 ├── scripts/
 │   ├── new_comp.sh         # create a competition directory
 │   ├── new_exp.sh          # copy the latest experiment and bump the number
@@ -29,7 +30,7 @@ kaggle_ws/
 
 - One experiment = one directory. Don't edit past experiments; copy them to start the next one (reproducibility).
 - Competition and experiment names are derived from the directory names, and outputs go to `outputs/<competition>/<exp>/`.
-- On Colab, outputs go to `MyDrive/kaggle/outputs/<competition>/<exp>/` when Google Drive is mounted.
+- On Colab, outputs go to `MyDrive/Colab Notebooks/Kaggle/<competition>/<exp>/` when Google Drive is mounted, and submissions to `<competition>/submissions/`. Every competition's Drive folder is named after it; the notebooks' `DRIVE_DIR` option changes the parent folder.
 
 ## Local setup
 
