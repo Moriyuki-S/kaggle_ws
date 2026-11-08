@@ -281,7 +281,7 @@ def evaluate_experiment(
     submission = COMPETITION_DIR / "exp" / exp / "submission"
     limits = yaml.safe_load((submission / "eval_config.yaml").read_text())["evaluation"]
     command = [
-        eval_python, "-m", "swegemma", "eval",
+        eval_python, COMPETITION_DIR / "swegemma_eval.py",
         "--tasks", tasks_path,
         # the harness looks for wheels and sandbox/setup.py next to the snapshots
         "--snapshots-dir", data_dir / "snapshots",
@@ -385,7 +385,8 @@ def main() -> None:
     model = models.pop()
 
     paths = get_paths(COMPETITION)
-    root = paths.output / "validate" / f"seed{args.seed}"
+    # v2: sessions compact old events as in scoring; earlier results ran without it
+    root = paths.output / "validate" / f"v2_seed{args.seed}"
     adapters = collect_adapters(exps, paths.output)
 
     kaggle_file("tasks.jsonl", paths.data)
