@@ -195,12 +195,10 @@ def collect_adapters(exps: list[str], paths) -> dict[str, Path]:
         for name in declared(submission, "adapter"):
             target = submission / "adapters" / name
             sources = [models / exp / name, paths.output / exp / name]
-            if not (target / "adapter_model.safetensors").exists():
-                if not install_adapter(sources, target):
-                    places = ", ".join(f"{s}/ or {s}.zip" for s in sources)
-                    raise SystemExit(
-                        f"{exp} declares adapter {name}; upload it to one of: {places}"
-                    )
+            ready = (target / "adapter_model.safetensors").exists()
+            if not ready and not install_adapter(sources, target):
+                places = ", ".join(f"{s}/ or {s}.zip" for s in sources)
+                raise SystemExit(f"{exp} declares adapter {name}; upload it to one of: {places}")
             print(f"{exp}: adapter {name} ready", flush=True)
             if name in adapters:
                 raise SystemExit(f"Adapter name {name} is used by more than one experiment.")
