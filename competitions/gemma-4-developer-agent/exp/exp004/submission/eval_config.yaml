@@ -1,0 +1,8 @@
+# About 120 tasks share 12 hours with ~15 min of start-up, which allows ~352 s per task.
+# A 5-minute cap keeps even the worst case (every task hitting the limit) inside the budget,
+# leaving ~50 s per task for sandbox setup. exp003 used 8 minutes and timed out on Kaggle.
+evaluation:
+  timeout_seconds: 240
+  max_tool_calls: 28
+  max_time_minutes: 5
+  max_turns: 80
