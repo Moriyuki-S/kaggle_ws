@@ -58,6 +58,9 @@ PACKAGES = ("transformers==5.13.1", "bitsandbytes", "accelerate", "huggingface_h
 MIN_GPU_GIB = 30
 MIN_DISK_GIB = 75
 KAGGLE_MODEL = "gemma-4"  # google/gemma-4/Transformers/gemma-4-31b-it in kernel-metadata.json
+# Kaggle 4x L4 has no internet: these come from the competition's wheelhouse dataset instead.
+WHEELHOUSE = "gemma-4-developer-agent-wheelhouse"
+WHEELHOUSE_PACKAGES = ("transformers", "tokenizers", "safetensors", "bitsandbytes")
 
 
 def gpu_gibs() -> list[float]:
@@ -76,11 +79,19 @@ def check_gpus() -> None:
 
 
 def prepare_kaggle() -> tuple[Path, Path]:
-    """Install packages and gather the attached inputs (notebooks/kaggle/train)."""
+    """Install packages offline and gather the attached inputs (notebooks/kaggle/train)."""
     from kaggle_ws import kaggle_input
 
     check_gpus()
-    subprocess.run([sys.executable, "-m", "pip", "install", "-q", *PACKAGES], check=True)
+    wheels = [
+        wheel
+        for name in WHEELHOUSE_PACKAGES
+        for wheel in sorted(kaggle_input(WHEELHOUSE).rglob(f"{name}-*.whl"))
+    ]
+    if len(wheels) != len(WHEELHOUSE_PACKAGES):
+        raise SystemExit(f"Attach metric/{WHEELHOUSE}; found {wheels}")
+    command = [sys.executable, "-m", "pip", "install", "-q", "--no-deps", *map(str, wheels)]
+    subprocess.run(command, check=True)
     configs = sorted(kaggle_input(KAGGLE_MODEL).rglob("config.json"))
     configs = [p for p in configs if "gemma-4-31b-it" in str(p) and "qat" not in str(p)]
     if len(configs) != 1:

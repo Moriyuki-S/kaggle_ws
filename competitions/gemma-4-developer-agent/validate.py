@@ -73,6 +73,12 @@ EVAL_FLAGS = {
 MIN_GPU_GIB = 30  # in total; the model is sharded over every GPU
 MIN_DISK_GIB = 60
 WORK = Path("/tmp/validate") if is_kaggle() else Path("/content")
+# Kaggle 4x L4 has no internet: kaggle_env.py uploads CPython 3.13 and the evaluation wheels,
+# and the QAT model comes from a mirror whose model.safetensors matches the Hugging Face sha256
+# (1b9b1d62...; checked on 2026-11-14).
+OFFLINE_ENV = "gemma-4-offline-env"
+QAT_MIRROR = "gemma-4-31b-w4a16-ct-mirror"
+QAT_BYTES = 23_265_352_448
 PORT = 8000
 SERVER_TIMEOUT_SECONDS = 1800
 POLL_SECONDS = 30
@@ -130,6 +136,75 @@ def gpu_count() -> int:
     return len(gibs)
 
 
+def configure_git() -> None:
+    run("git", "config", "--global", "user.email", "agent@eval")
+    run("git", "config", "--global", "user.name", "Agent")
+    run("git", "config", "--global", "init.defaultBranch", "main")
+
+
+def add_sandbox_shims(eval_python: Path, data_dir: Path) -> None:
+    """Modules removed in Python 3.13 that the official sandbox image adds back."""
+    site = next((eval_python.parents[1] / "lib").glob("python*/site-packages"))
+    for name in ("imp.py", "telnetlib.py"):
+        kaggle_file(f"docker/{name}", data_dir)
+        shutil.copy(data_dir / "docker" / name, site / name)
+
+
+def install_wheelhouse(wheels: Path) -> None:
+    """Install the scoring wheels into Kaggle's Python 3.12, as the official starter does."""
+    staging = WORK / "wheelhouse"
+    staging.mkdir(parents=True, exist_ok=True)
+    targets = []
+    for wheel in sorted(wheels.glob("*.whl")):
+        if "cutlass" in wheel.name.lower():
+            continue
+        name = wheel.name
+        if "cu128" in name and "+" not in name:
+            name = name.replace("cu128", "+cu128")
+        if not (staging / name).exists():
+            shutil.copyfile(wheel, staging / name)
+        targets.append(staging / name)
+    run(sys.executable, "-m", "pip", "install", "-q", "--no-deps", "--force-reinstall", *targets)
+
+
+def prepare_kaggle_machine(data_dir: Path) -> tuple[Path, Path, Path]:
+    """Build both environments offline from the attached inputs (notebooks/kaggle/validate)."""
+    configure_git()
+    wheels = next(kaggle_input(WHEELHOUSE.split("/")[1]).rglob("swegemma-*.whl")).parent
+    install_wheelhouse(wheels)
+    server_python = Path(sys.executable)
+
+    env = kaggle_input(OFFLINE_ENV)
+    requirements = next(env.rglob("requirements.txt"), None)
+    if requirements is None:
+        raise SystemExit(f"Attach the {OFFLINE_ENV} dataset (made by kaggle_env.py).")
+    interpreter = next(WORK.glob("python/bin/python3.13"), None)
+    if interpreter is None:
+        archive = next(env.rglob("cpython-3.13-linux.tar.gz"), None)
+        if archive is not None:
+            run("tar", "-xzf", archive, "-C", WORK)
+            interpreter = WORK / "python/bin/python3.13"
+        else:  # Kaggle may have unpacked the archive already
+            interpreter = next(env.rglob("bin/python3.13"))
+    eval_python = WORK / "validate_env/eval/bin/python"
+    if not eval_python.exists():
+        # The official sandbox runs Python 3.13, and tasks run with this interpreter.
+        run("uv", "venv", "-q", "--python", interpreter, eval_python.parents[1])
+    links = ("--offline", "--no-index", "--find-links", requirements.parent, "--find-links", wheels)
+    harness = [next(wheels.glob(f"{name}-*.whl")) for name in ("adk_submission", "adk_eval_core")]
+    run("uv", "pip", "install", "-q", *links, "--python", eval_python, "-r", requirements, *harness)
+    run("uv", "pip", "install", "-q", *links, "--python", eval_python, "--no-deps",
+        next(wheels.glob("swegemma-*.whl")))  # fmt: skip
+    add_sandbox_shims(eval_python, data_dir)
+
+    weights = next(kaggle_input(QAT_MIRROR).rglob("model.safetensors"), None)
+    if weights is None:
+        raise SystemExit(f"Attach the {QAT_MIRROR} model (see kernel-metadata.json).")
+    if weights.stat().st_size != QAT_BYTES:
+        raise SystemExit(f"{weights} is not the checked QAT checkpoint.")
+    return server_python, eval_python, weights.parent
+
+
 def prepare_machine(model: str, data_dir: Path) -> tuple[Path, Path, Path]:
     """Build both environments and download the model."""
     WORK.mkdir(parents=True, exist_ok=True)
@@ -137,18 +212,16 @@ def prepare_machine(model: str, data_dir: Path) -> tuple[Path, Path, Path]:
     print(f"free disk {disk_gib:.0f} GiB", flush=True)
     if disk_gib < MIN_DISK_GIB:
         raise SystemExit(f"About {MIN_DISK_GIB} GiB of free disk is needed.")
+    if is_kaggle():
+        return prepare_kaggle_machine(data_dir)
 
     run("apt-get", "update", "-qq")
     run("apt-get", "install", "-y", "-qq", "git", "patch", "pigz", "protobuf-compiler")
-    run("git", "config", "--global", "user.email", "agent@eval")
-    run("git", "config", "--global", "user.name", "Agent")
-    run("git", "config", "--global", "init.defaultBranch", "main")
+    configure_git()
     run(sys.executable, "-m", "pip", "install", "-q", "uv", "huggingface_hub")
 
     wheels = data_dir / "wheelhouse"
-    if is_kaggle():
-        wheels = next(kaggle_input(WHEELHOUSE.split("/")[1]).rglob("swegemma-*.whl")).parent
-    elif not any(wheels.glob("swegemma-*.whl")):
+    if not any(wheels.glob("swegemma-*.whl")):
         run("kaggle", "datasets", "download", WHEELHOUSE, "-p", wheels, "--unzip", "-q")
     pins = ("uv", "pip", "install", "-q", "--exclude-newer", EXCLUDE_NEWER, "--find-links", wheels)
 
@@ -165,10 +238,7 @@ def prepare_machine(model: str, data_dir: Path) -> tuple[Path, Path, Path]:
     run(*pins, "--python", eval_python, *harness, *EVAL_PACKAGES)
     run("uv", "pip", "install", "-q", "--python", eval_python, "--no-deps",
         next(wheels.glob("swegemma-*.whl")))  # fmt: skip
-    site = next((root / "eval/lib").glob("python*/site-packages"))
-    for name in ("imp.py", "telnetlib.py"):
-        kaggle_file(f"docker/{name}", data_dir)
-        shutil.copy(data_dir / "docker" / name, site / name)
+    add_sandbox_shims(eval_python, data_dir)
 
     from huggingface_hub import snapshot_download
 

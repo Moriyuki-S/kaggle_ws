@@ -7,10 +7,19 @@
   "is_private": true,
   "enable_gpu": true,
   "enable_tpu": false,
-  "enable_internet": true,
-  "dataset_sources": ["metric/gemma-4-developer-agent-wheelhouse"],
+  "enable_internet": false,
+  "dataset_sources": [
+    "hotcoffee012/kaggle-ws-code",
+    "hotcoffee012/gemma-4-offline-env",
+    "metric/gemma-4-developer-agent-wheelhouse"
+  ],
   "kernel_sources": [],
-  "competition_sources": ["gemma-4-developer-agent"],
-  "model_sources": [],
+  "competition_sources": [
+    "gemma-4-developer-agent"
+  ],
+  "model_sources": [
+    "thomasplocher/gemma-4-31b-w4a16-ct-mirror/Transformers/gemma-4-31b-it-qat-w4a16-ct/1"
+  ],
+  "docker_image": "gcr.io/kaggle-private-byod/python@sha256:37c64f7dd9c54116ecd1bcc88817c5469b88387388fade02bfa8bf3fc647d461",
   "machine_shape": "NvidiaL4"
 }
