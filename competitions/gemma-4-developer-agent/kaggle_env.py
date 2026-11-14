@@ -60,9 +60,10 @@ def harness_wheels(directory: Path) -> list[Path]:
 
 def main() -> None:
     work = REPO_ROOT / "outputs" / "gemma-4-developer-agent" / "kaggle_env"
-    stage = work / "stage"
-    shutil.rmtree(stage, ignore_errors=True)
-    stage.mkdir(parents=True)
+    env, stage = work / "env", work / "stage"
+    for directory in (env, stage):
+        shutil.rmtree(directory, ignore_errors=True)
+        directory.mkdir(parents=True)
 
     harness = harness_wheels(work / "harness")
     requirements = work / "requirements.in"
@@ -75,16 +76,18 @@ def main() -> None:
     )  # fmt: skip
     # the harness wheels are listed by path; they are attached through the wheelhouse instead
     lines = [line for line in pins.read_text().splitlines() if "==" in line]
-    (stage / "requirements.txt").write_text("\n".join(lines) + "\n")
+    (env / "requirements.txt").write_text("\n".join(lines) + "\n")
 
     command = [sys.executable, "-m", "pip", "download", "-q", "--no-deps", "--only-binary=:all:"]
     command += ["--python-version", "3.13", "--implementation", "cp"]
     command += ["--abi", "cp313", "--abi", "abi3", "--abi", "none"]
     command += [arg for platform in PLATFORMS for arg in ("--platform", platform)]
-    run(*command, "-r", stage / "requirements.txt", "-d", stage)
+    run(*command, "-r", env / "requirements.txt", "-d", env)
 
-    with urllib.request.urlopen(PYTHON_URL) as response, open(stage / PYTHON_ARCHIVE, "wb") as f:
+    with urllib.request.urlopen(PYTHON_URL) as response, open(env / PYTHON_ARCHIVE, "wb") as f:
         shutil.copyfileobj(response, f)
+    # A dataset of many files was never created, while one tar works (Kaggle unpacks it).
+    run("tar", "-cf", stage / "offline_env.tar", "-C", env, ".")
 
     metadata = {"id": DATASET, "title": "gemma-4-offline-env", "licenses": [{"name": "other"}]}
     (stage / "dataset-metadata.json").write_text(json.dumps(metadata))

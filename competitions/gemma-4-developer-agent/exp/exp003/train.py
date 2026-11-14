@@ -83,15 +83,19 @@ def prepare_kaggle() -> tuple[Path, Path]:
     from kaggle_ws import kaggle_input
 
     check_gpus()
-    wheels = [
-        wheel
-        for name in WHEELHOUSE_PACKAGES
-        for wheel in sorted(kaggle_input(WHEELHOUSE).rglob(f"{name}-*.whl"))
-    ]
-    if len(wheels) != len(WHEELHOUSE_PACKAGES):
-        raise SystemExit(f"Attach metric/{WHEELHOUSE}; found {wheels}")
-    command = [sys.executable, "-m", "pip", "install", "-q", "--no-deps", *map(str, wheels)]
-    subprocess.run(command, check=True)
+    if os.environ.get("WHEELHOUSE_INSTALLED") != "1":
+        wheels = [
+            wheel
+            for name in WHEELHOUSE_PACKAGES
+            for wheel in sorted(kaggle_input(WHEELHOUSE).rglob(f"{name}-*.whl"))
+        ]
+        if len(wheels) != len(WHEELHOUSE_PACKAGES):
+            raise SystemExit(f"Attach metric/{WHEELHOUSE}; found {wheels}")
+        command = [sys.executable, "-m", "pip", "install", "-q", "--no-deps", *map(str, wheels)]
+        subprocess.run(command, check=True)
+        # safetensors is already imported at its old version: start again with the new ones.
+        os.environ["WHEELHOUSE_INSTALLED"] = "1"
+        os.execv(sys.executable, [sys.executable, *sys.argv])
     configs = sorted(kaggle_input(KAGGLE_MODEL).rglob("config.json"))
     configs = [p for p in configs if "gemma-4-31b-it" in str(p) and "qat" not in str(p)]
     if len(configs) != 1:

@@ -184,8 +184,12 @@ def prepare_kaggle_machine(data_dir: Path) -> tuple[Path, Path, Path]:
         if archive is not None:
             run("tar", "-xzf", archive, "-C", WORK)
             interpreter = WORK / "python/bin/python3.13"
-        else:  # Kaggle may have unpacked the archive already
-            interpreter = next(env.rglob("bin/python3.13"))
+        else:  # Kaggle unpacked it, dropping permissions: copy it and mark programs executable
+            source = next(env.rglob("bin/python3.13")).parents[1]
+            shutil.copytree(source, WORK / "python", symlinks=True)
+            for program in (WORK / "python/bin").iterdir():
+                program.chmod(0o755)
+            interpreter = WORK / "python/bin/python3.13"
     eval_python = WORK / "validate_env/eval/bin/python"
     if not eval_python.exists():
         # The official sandbox runs Python 3.13, and tasks run with this interpreter.
