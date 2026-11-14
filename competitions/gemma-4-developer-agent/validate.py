@@ -73,10 +73,10 @@ EVAL_FLAGS = {
 MIN_GPU_GIB = 30  # in total; the model is sharded over every GPU
 MIN_DISK_GIB = 60
 WORK = Path("/tmp/validate") if is_kaggle() else Path("/content")
-# Kaggle 4x L4 has no internet: kaggle_env.py uploads CPython 3.13 and the evaluation wheels,
-# and the QAT model comes from a mirror whose model.safetensors matches the Hugging Face sha256
+# Kaggle 4x L4 has no internet: kaggle_env.py uploads the evaluation wheels (for the image's
+# Python 3.12, as Kaggle rejected a CPython 3.13 build), and the QAT model comes from a mirror whose model.safetensors matches the Hugging Face sha256
 # (1b9b1d62...; checked on 2026-11-14).
-OFFLINE_ENV = "gemma-4-offline-env"
+OFFLINE_ENV = "kaggle-ws-eval-wheels"
 QAT_MIRROR = "gemma-4-31b-w4a16-ct-mirror"
 QAT_BYTES = 23_265_352_448
 PORT = 8000
@@ -178,22 +178,10 @@ def prepare_kaggle_machine(data_dir: Path) -> tuple[Path, Path, Path]:
     requirements = next(env.rglob("requirements.txt"), None)
     if requirements is None:
         raise SystemExit(f"Attach the {OFFLINE_ENV} dataset (made by kaggle_env.py).")
-    interpreter = next(WORK.glob("python/bin/python3.13"), None)
-    if interpreter is None:
-        archive = next(env.rglob("cpython-3.13-linux.tar.gz"), None)
-        if archive is not None:
-            run("tar", "-xzf", archive, "-C", WORK)
-            interpreter = WORK / "python/bin/python3.13"
-        else:  # Kaggle unpacked it, dropping permissions: copy it and mark programs executable
-            source = next(env.rglob("bin/python3.13")).parents[1]
-            shutil.copytree(source, WORK / "python", symlinks=True)
-            for program in (WORK / "python/bin").iterdir():
-                program.chmod(0o755)
-            interpreter = WORK / "python/bin/python3.13"
     eval_python = WORK / "validate_env/eval/bin/python"
     if not eval_python.exists():
-        # The official sandbox runs Python 3.13, and tasks run with this interpreter.
-        run("uv", "venv", "-q", "--python", interpreter, eval_python.parents[1])
+        # Tasks run with this interpreter: 3.12 here, while the official sandbox runs 3.13.
+        run("uv", "venv", "-q", "--python", "/usr/bin/python3.12", eval_python.parents[1])
     links = ("--offline", "--no-index", "--find-links", requirements.parent, "--find-links", wheels)
     harness = [next(wheels.glob(f"{name}-*.whl")) for name in ("adk_submission", "adk_eval_core")]
     run("uv", "pip", "install", "-q", *links, "--python", eval_python, "-r", requirements, *harness)

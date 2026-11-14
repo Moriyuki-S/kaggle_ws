@@ -1,9 +1,10 @@
-"""Build the offline evaluation environment for Kaggle 4x L4 and upload it as a private dataset.
+"""Build the offline evaluation wheels for Kaggle 4x L4 and upload them as a private dataset.
 
-Kaggle offers 4x L4 only without internet, and its image has Python 3.12, while the scoring
-sandbox runs Python 3.13. This downloads a standalone CPython 3.13 and the wheels of every
-evaluation package (resolved for Linux with the same cutoff as validate.py), so that
-validate.py can build the evaluation environment offline. Run locally once:
+Kaggle offers 4x L4 only without internet. This downloads the wheels of every evaluation
+package, resolved for Linux and the image's Python 3.12 with the same cutoff as validate.py,
+so that validate.py can build the evaluation environment offline. The scoring sandbox runs
+Python 3.13, but Kaggle never finished creating a dataset that held a CPython 3.13 build,
+so tasks run on 3.12 there. Run locally once:
 
     uv run python competitions/gemma-4-developer-agent/kaggle_env.py
 """
@@ -12,17 +13,12 @@ import json
 import shutil
 import subprocess
 import sys
-import urllib.request
 from pathlib import Path
 
 from validate import EVAL_PACKAGES, EXCLUDE_NEWER, WHEELHOUSE
 
-DATASET = "hotcoffee012/gemma-4-offline-env"
-PYTHON_URL = (
-    "https://github.com/astral-sh/python-build-standalone/releases/download/20250212/"
-    "cpython-3.13.2%2B20250212-x86_64-unknown-linux-gnu-install_only_stripped.tar.gz"
-)
-PYTHON_ARCHIVE = "cpython-3.13-linux.tar.gz"
+DATASET = "hotcoffee012/kaggle-ws-eval-wheels"
+PYTHON_VERSION = "3.12"  # the Kaggle image's
 HARNESS = ("adk_submission", "adk_eval_core")
 PLATFORMS = (
     "manylinux_2_28_x86_64",
@@ -71,7 +67,7 @@ def main() -> None:
     pins = work / "requirements.txt"
     run(
         "uv", "pip", "compile", requirements, "-o", pins, "--no-header", "--no-annotate",
-        "--python-version", "3.13", "--python-platform", "x86_64-manylinux_2_28",
+        "--python-version", PYTHON_VERSION, "--python-platform", "x86_64-manylinux_2_28",
         "--exclude-newer", EXCLUDE_NEWER, "--find-links", harness[0].parent,
     )  # fmt: skip
     # the harness wheels are listed by path; they are attached through the wheelhouse instead
@@ -79,17 +75,14 @@ def main() -> None:
     (env / "requirements.txt").write_text("\n".join(lines) + "\n")
 
     command = [sys.executable, "-m", "pip", "download", "-q", "--no-deps", "--only-binary=:all:"]
-    command += ["--python-version", "3.13", "--implementation", "cp"]
-    command += ["--abi", "cp313", "--abi", "abi3", "--abi", "none"]
+    command += ["--python-version", PYTHON_VERSION, "--implementation", "cp"]
+    command += ["--abi", f"cp{PYTHON_VERSION.replace('.', '')}", "--abi", "abi3", "--abi", "none"]
     command += [arg for platform in PLATFORMS for arg in ("--platform", platform)]
     run(*command, "-r", env / "requirements.txt", "-d", env)
+    # Kaggle unpacks the tar; one file uploads faster than many.
+    run("tar", "-cf", stage / "eval_wheels.tar", "-C", env, ".")
 
-    with urllib.request.urlopen(PYTHON_URL) as response, open(env / PYTHON_ARCHIVE, "wb") as f:
-        shutil.copyfileobj(response, f)
-    # A dataset of many files was never created, while one tar works (Kaggle unpacks it).
-    run("tar", "-cf", stage / "offline_env.tar", "-C", env, ".")
-
-    metadata = {"id": DATASET, "title": "gemma-4-offline-env", "licenses": [{"name": "other"}]}
+    metadata = {"id": DATASET, "title": DATASET.split("/")[1], "licenses": [{"name": "CC0-1.0"}]}
     (stage / "dataset-metadata.json").write_text(json.dumps(metadata))
     exists = subprocess.run(
         ["kaggle", "datasets", "status", DATASET], check=False, capture_output=True
@@ -98,7 +91,7 @@ def main() -> None:
         run("kaggle", "datasets", "version", "-p", stage, "-m", f"exclude-newer {EXCLUDE_NEWER}")
     else:
         run("kaggle", "datasets", "create", "-p", stage)
-    print(f"uploaded {len(lines)} wheels and CPython 3.13 to {DATASET}")
+    print(f"uploaded {len(lines)} wheels for Python {PYTHON_VERSION} to {DATASET}")
 
 
 if __name__ == "__main__":

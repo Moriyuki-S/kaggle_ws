@@ -10,7 +10,7 @@
   "enable_internet": false,
   "dataset_sources": [
     "hotcoffee012/kaggle-ws-code",
-    "hotcoffee012/gemma-4-offline-env",
+    "hotcoffee012/kaggle-ws-eval-wheels",
     "metric/gemma-4-developer-agent-wheelhouse"
   ],
   "kernel_sources": [],
