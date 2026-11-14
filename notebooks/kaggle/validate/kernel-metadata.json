@@ -1,0 +1,16 @@
+{
+  "id": "hotcoffee012/gemma-4-validate",
+  "title": "gemma-4-validate",
+  "code_file": "run.py",
+  "language": "python",
+  "kernel_type": "script",
+  "is_private": true,
+  "enable_gpu": true,
+  "enable_tpu": false,
+  "enable_internet": true,
+  "dataset_sources": ["metric/gemma-4-developer-agent-wheelhouse"],
+  "kernel_sources": [],
+  "competition_sources": ["gemma-4-developer-agent"],
+  "model_sources": [],
+  "machine_shape": "NvidiaL4"
+}

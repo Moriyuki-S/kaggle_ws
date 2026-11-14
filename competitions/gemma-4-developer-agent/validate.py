@@ -1,10 +1,13 @@
-"""Compare experiments on the public tasks with the official harness on one Colab GPU.
+"""Compare experiments on the public tasks with the official harness.
 
-Run through notebooks/colab_validate.ipynb. Each sampled task is first run with its reference
+Run through notebooks/colab_validate.ipynb (one A100) or notebooks/kaggle/validate (4x L4,
+the scoring hardware; vLLM shards the model over every GPU as scoring does).
+Each sampled task is first run with its reference
 patch, and tasks that fail even then (the local sandbox lacks something the tests need) are
 replaced by the next ones. One vLLM server then serves the official QAT model and every
 adapter, and `swegemma eval` runs each experiment on the same tasks.
-Finished tasks are kept on Drive, so running again continues where it stopped.
+Finished tasks are kept on Drive (or in the Kaggle output, when that is attached to the next
+run), so running again continues where it stopped.
 """
 
 import argparse
@@ -27,7 +30,7 @@ from pathlib import Path
 
 import yaml
 
-from kaggle_ws import get_paths
+from kaggle_ws import find_kaggle_inputs, get_paths, is_kaggle, kaggle_input
 
 COMPETITION_DIR = Path(__file__).resolve().parent
 COMPETITION = COMPETITION_DIR.name
@@ -67,8 +70,9 @@ EVAL_FLAGS = {
     "max_time_minutes": "--max-time-minutes",
     "max_turns": "--max-turns",
 }
-MIN_GPU_GIB = 30
+MIN_GPU_GIB = 30  # in total; the model is sharded over every GPU
 MIN_DISK_GIB = 60
+WORK = Path("/tmp/validate") if is_kaggle() else Path("/content")
 PORT = 8000
 SERVER_TIMEOUT_SECONDS = 1800
 POLL_SECONDS = 30
@@ -105,23 +109,32 @@ def download(names: list[str], data_dir: Path) -> None:
 
 
 def prepare_data(data_dir: Path) -> None:
+    if is_kaggle():
+        return  # the competition is attached as an input
     names = [name for name in competition_files() if name.startswith("wheels/")]
     download([*names, "sandbox/setup.py"], data_dir)
 
 
-def prepare_machine(model: str, data_dir: Path) -> tuple[Path, Path, Path]:
-    """Check the machine, then build both environments and download the model."""
+def gpu_count() -> int:
+    """Check the machine; returns how many GPUs vLLM shards the model over."""
     memory = subprocess.run(
         ["nvidia-smi", "--query-gpu=memory.total", "--format=csv,noheader,nounits"],
         check=True,
         capture_output=True,
         text=True,
     ).stdout
-    gpu_gib = int(memory.splitlines()[0]) / 1024
-    disk_gib = shutil.disk_usage("/content").free / 2**30
-    print(f"GPU {gpu_gib:.0f} GiB; free disk {disk_gib:.0f} GiB", flush=True)
-    if gpu_gib < MIN_GPU_GIB:
-        raise SystemExit("This GPU is too small: select an A100 runtime.")
+    gibs = [int(line) / 1024 for line in memory.splitlines() if line.strip()]
+    print(f"GPU {len(gibs)}x {min(gibs):.0f} GiB", flush=True)
+    if sum(gibs) < MIN_GPU_GIB:
+        raise SystemExit("The GPUs are too small: select a Colab A100 or a Kaggle L4x4 machine.")
+    return len(gibs)
+
+
+def prepare_machine(model: str, data_dir: Path) -> tuple[Path, Path, Path]:
+    """Build both environments and download the model."""
+    WORK.mkdir(parents=True, exist_ok=True)
+    disk_gib = shutil.disk_usage(WORK).free / 2**30
+    print(f"free disk {disk_gib:.0f} GiB", flush=True)
     if disk_gib < MIN_DISK_GIB:
         raise SystemExit(f"About {MIN_DISK_GIB} GiB of free disk is needed.")
 
@@ -133,11 +146,13 @@ def prepare_machine(model: str, data_dir: Path) -> tuple[Path, Path, Path]:
     run(sys.executable, "-m", "pip", "install", "-q", "uv", "huggingface_hub")
 
     wheels = data_dir / "wheelhouse"
-    if not any(wheels.glob("swegemma-*.whl")):
+    if is_kaggle():
+        wheels = next(kaggle_input(WHEELHOUSE.split("/")[1]).rglob("swegemma-*.whl")).parent
+    elif not any(wheels.glob("swegemma-*.whl")):
         run("kaggle", "datasets", "download", WHEELHOUSE, "-p", wheels, "--unzip", "-q")
     pins = ("uv", "pip", "install", "-q", "--exclude-newer", EXCLUDE_NEWER, "--find-links", wheels)
 
-    root = Path("/content/validate_env")
+    root = WORK / "validate_env"
     server_python, eval_python = root / "server/bin/python", root / "eval/bin/python"
     if not server_python.exists():
         # The scoring wheels are built for Python 3.12.
@@ -157,7 +172,7 @@ def prepare_machine(model: str, data_dir: Path) -> tuple[Path, Path, Path]:
 
     from huggingface_hub import snapshot_download
 
-    model_dir = Path("/content/model_qat")
+    model_dir = WORK / "model_qat"
     snapshot_download(
         f"google/{model}",
         allow_patterns=["*.json", "*.jinja", "*.txt", "*.safetensors"],
@@ -204,8 +219,10 @@ def collect_adapters(exps: list[str], output: Path) -> dict[str, Path]:
         for name in declared(submission, "adapter"):
             target = submission / "adapters" / name
             source = output / exp / name
+            # on Kaggle, the training kernel's output is attached as an input
+            sources = [source, *find_kaggle_inputs(f"{exp}/{name}")] if is_kaggle() else [source]
             ready = (target / "adapter_model.safetensors").exists()
-            if not ready and not install_adapter([source], target):
+            if not ready and not install_adapter(sources, target):
                 raise SystemExit(f"{exp} declares adapter {name}: upload {source}/ or {source}.zip")
             print(f"{exp}: adapter {name} ready", flush=True)
             if name in adapters:
@@ -219,15 +236,16 @@ def adapter_rank(path: Path) -> int:
 
 
 def start_server(
-    server_python: Path, model_dir: Path, model: str, adapters: dict[str, Path], log: Path
+    server_python: Path, model_dir: Path, model: str, adapters: dict[str, Path], log: Path, gpus
 ) -> subprocess.Popen:
-    """Start vLLM with the scoring flags from HARNESS_README, on one GPU instead of four."""
+    """Start vLLM with the scoring flags from HARNESS_README (scoring uses 4 GPUs)."""
     command = [
         server_python, "-m", "vllm.entrypoints.openai.api_server",
         "--model", model_dir,
         "--served-model-name", model,
         "--host", "127.0.0.1",
         "--port", PORT,
+        "--tensor-parallel-size", gpus,
         "--max-model-len", 32768,
         "--gpu-memory-utilization", 0.90,
         "--enable-auto-tool-choice",
@@ -495,10 +513,15 @@ def main() -> None:
     paths = get_paths(COMPETITION)
     # v3: reference-patch check and extra test packages; v2 compacted sessions as scoring does
     root = paths.output / "validate" / f"v3_seed{args.seed}"
+    if is_kaggle() and not root.exists():
+        for previous in find_kaggle_inputs(f"validate/{root.name}")[:1]:
+            print(f"continuing the results in {previous}", flush=True)
+            shutil.copytree(previous, root)
     adapters = collect_adapters(exps, paths.output)
 
     kaggle_file("tasks.jsonl", paths.data)
     candidates = sample_tasks(paths.data / "tasks.jsonl", args.repos, args.seed)
+    gpus = gpu_count()
     prepare_data(paths.data)
     server_python, eval_python, model_dir = prepare_machine(model, paths.data)
     submission = COMPETITION_DIR / "exp" / exps[0] / "submission"
@@ -510,7 +533,7 @@ def main() -> None:
 
     for exp in exps:
         (root / exp).mkdir(parents=True, exist_ok=True)
-    server = start_server(server_python, model_dir, model, adapters, Path("/content/vllm.log"))
+    server = start_server(server_python, model_dir, model, adapters, WORK / "vllm.log", gpus)
     try:
         for exp in exps:
             evaluate_experiment(eval_python, exp, sample, paths.data, root / exp, args)

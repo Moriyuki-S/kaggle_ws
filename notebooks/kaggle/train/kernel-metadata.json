@@ -1,0 +1,16 @@
+{
+  "id": "hotcoffee012/gemma-4-lora-train",
+  "title": "gemma-4-lora-train",
+  "code_file": "run.py",
+  "language": "python",
+  "kernel_type": "script",
+  "is_private": true,
+  "enable_gpu": true,
+  "enable_tpu": false,
+  "enable_internet": true,
+  "dataset_sources": ["dmitriigluzdov/gemma-4-serving-and-lora-verification-kit"],
+  "kernel_sources": [],
+  "competition_sources": ["gemma-4-developer-agent"],
+  "model_sources": ["google/gemma-4/Transformers/gemma-4-31b-it/1"],
+  "machine_shape": "NvidiaL4"
+}

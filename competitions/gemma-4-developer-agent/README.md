@@ -44,13 +44,13 @@ On Colab, everything goes to `MyDrive/Colab Notebooks/Kaggle/gemma-4-developer-a
 
 ## Validation on Colab
 
-`notebooks/colab_validate.ipynb` compares experiments on the public tasks without using a Kaggle submission. Select an A100 runtime, set `EXPS = "exp001,exp003"` (the first is the baseline), and run all. Keep `ARGS = "--num-tasks 2"` to check the setup, then clear it for 30 tasks.
+`notebooks/colab_validate.ipynb` (Colab A100) or `notebooks/kaggle/validate` (Kaggle 4x L4, see below) compares experiments on the public tasks without using a Kaggle submission. On Colab, select an A100 runtime, set `EXPS = "exp001,exp003"` (the first is the baseline), and run all. Keep `ARGS = "--num-tasks 2"` to check the setup, then clear it for 30 tasks.
 
 `validate.py` serves the official QAT model and every adapter with vLLM, then runs `swegemma eval --sandbox subprocess` through `swegemma_eval.py`, which adds the event compaction and prompt caching that scoring uses (without them, long sessions fail with `ContextWindowExceededError`). It takes limits from each `eval_config.yaml` and each adapter from `<exp>/<adapter>/` (or `<exp>/<adapter>.zip`) in the Drive folder. Results go to `validate/v3_seed<seed>/` in the Drive folder, and running again skips finished tasks.
 
 Before any model runs, each sampled task is run with its reference patch (a stand-in model applies it), and tasks that fail even then are replaced by the next ones: the local sandbox lacks some test dependencies of the official image (for example `inline_snapshot`, or the `pygments` version that `rich` tests expect).
 
-Trust the difference between experiments rather than the absolute rate: this differs from scoring in GPU layout, network access, and memory limits. `psf/requests` tasks are excluded because their tests need `pytest-httpbin`, which the published wheels do not include.
+Trust the difference between experiments rather than the absolute rate: this differs from scoring in network access and memory limits (and, on Colab, in GPU layout). `psf/requests` tasks are excluded because their tests need `pytest-httpbin`, which the published wheels do not include.
 
 ## LoRA training on Colab (exp003)
 
@@ -59,3 +59,10 @@ Use `notebooks/colab_runner.ipynb` on an A100 runtime with `KAGGLE_API_TOKEN` in
 The `.skip_download` file stops the runner from downloading the full competition data (about 22 GB), so `train.py` fetches only what it needs.
 
 Running again resumes from `checkpoint.pt` on Drive. Training data comes from `dmitriigluzdov/gemma-4-serving-and-lora-verification-kit` (CC BY 4.0).
+
+## Kaggle 4x L4 (when Colab compute units run out)
+
+Both kernels clone this repo from GitHub (`main`), so push changes first. They run as private script kernels on `NvidiaL4` (4x L4, the scoring hardware) with internet on, and count against the weekly Kaggle GPU quota; a session ends after 12 hours. An optional `HF_TOKEN` Kaggle secret is used for Hugging Face downloads.
+
+- Training: edit `EXP` and `ARGS` in `notebooks/kaggle/train/run.py` (start with `--smoke`), then `uv run kaggle kernels push -p notebooks/kaggle/train`. The bf16 checkpoint, the data kit and the sample adapter are attached inputs; the nf4 model is split layer by layer over the four GPUs. Outputs go to `/kaggle/working/<exp>/`. To resume, attach the kernel's previous output as an input: `train.py` copies `<exp>/checkpoint.pt` and the files next to it from there.
+- Validation: edit `ARGS` in `notebooks/kaggle/validate/run.py`, then `uv run kaggle kernels push -p notebooks/kaggle/validate`. vLLM shards the QAT model over the four GPUs (`--tensor-parallel-size 4`) as scoring does. Adapters come from any attached input holding `<exp>/<adapter>/` (the training kernel's output, or a dataset made from the Drive folder). Results go to `/kaggle/working/validate/`; attach the previous output to continue them.

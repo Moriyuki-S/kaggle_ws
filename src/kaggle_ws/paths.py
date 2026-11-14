@@ -34,10 +34,29 @@ def drive_root() -> Path:
     return MY_DRIVE / folder
 
 
+def kaggle_input(slug: str) -> Path:
+    """Where Kaggle mounts an attached input: newer kernels nest it by kind and owner."""
+    root = Path("/kaggle/input")
+    for pattern in (slug, f"*/{slug}", f"*/*/{slug}"):
+        found = sorted(root.glob(pattern))
+        if found:
+            return found[0]
+    return root / slug
+
+
+def find_kaggle_inputs(relative: str, max_depth: int = 4) -> list[Path]:
+    """Paths ending in `relative` inside attached inputs, such as an earlier kernel's output."""
+    root = Path("/kaggle/input")
+    found: list[Path] = []
+    for depth in range(max_depth + 1):
+        found += sorted(root.glob("*/" * depth + relative))
+    return found
+
+
 def get_paths(competition: str) -> Paths:
     """DATA_DIR / OUTPUT_DIR env vars take precedence."""
     if is_kaggle():
-        data = Path("/kaggle/input") / competition
+        data = kaggle_input(competition)
         output = Path("/kaggle/working")
     elif is_colab():
         data = Path("/content/data") / competition

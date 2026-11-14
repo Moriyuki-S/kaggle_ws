@@ -1,9 +1,11 @@
-"""Train a LoRA adapter for Gemma 4 31B on a single Colab GPU from captured agent trajectories.
+"""Train a LoRA adapter for Gemma 4 31B from captured agent trajectories.
 
-The checkpoint is loaded in nf4 so that it fits one GPU; the adapter is served later on the
-official QAT checkpoint through vLLM. Progress is checkpointed so a new session can resume.
+The checkpoint is loaded in nf4: on one GPU of 30 GiB or more (Colab A100), or split layer by
+layer across several smaller ones (Kaggle 4x L4). The adapter is served later on the official
+QAT checkpoint through vLLM. Progress is checkpointed so a new session can resume.
 
-Run through notebooks/colab_runner.ipynb. This script downloads only the files it needs.
+Run through notebooks/colab_runner.ipynb (downloads only the files it needs) or
+notebooks/kaggle/train (reads the attached Kaggle inputs).
 
 Data: dmitriigluzdov/gemma-4-serving-and-lora-verification-kit (CC BY 4.0).
 """
@@ -52,20 +54,72 @@ KIT = "dmitriigluzdov/gemma-4-serving-and-lora-verification-kit"
 KIT_FILES = ("lora_data.py", "lora_native_resolved.jsonl", "lora_external_A.jsonl")
 SAMPLE_ADAPTER = "sample_submission/adapters/main_lora/adapter_model.safetensors"
 PACKAGES = ("transformers==5.13.1", "bitsandbytes", "accelerate", "huggingface_hub", "six")
+# A single GPU needs this much; smaller GPUs need this much in total, as the model is split.
 MIN_GPU_GIB = 30
 MIN_DISK_GIB = 75
+KAGGLE_MODEL = "gemma-4"  # google/gemma-4/Transformers/gemma-4-31b-it in kernel-metadata.json
+
+
+def gpu_gibs() -> list[float]:
+    count = torch.cuda.device_count()
+    return [torch.cuda.get_device_properties(i).total_memory / 2**30 for i in range(count)]
+
+
+def check_gpus() -> None:
+    gibs = gpu_gibs()
+    if not gibs:
+        raise SystemExit("No GPU: select a Colab A100 or a Kaggle L4x4 machine.")
+    name = torch.cuda.get_device_properties(0).name
+    print(f"GPU: {len(gibs)}x {name} {min(gibs):.0f} GiB", flush=True)
+    if max(gibs) < MIN_GPU_GIB and sum(gibs) < 2 * MIN_GPU_GIB:
+        raise SystemExit(f"{len(gibs)}x {name} is too small for the nf4 model.")
+
+
+def prepare_kaggle() -> tuple[Path, Path]:
+    """Install packages and gather the attached inputs (notebooks/kaggle/train)."""
+    from kaggle_ws import kaggle_input
+
+    check_gpus()
+    subprocess.run([sys.executable, "-m", "pip", "install", "-q", *PACKAGES], check=True)
+    configs = sorted(kaggle_input(KAGGLE_MODEL).rglob("config.json"))
+    configs = [p for p in configs if "gemma-4-31b-it" in str(p) and "qat" not in str(p)]
+    if len(configs) != 1:
+        raise SystemExit(f"Attach google/gemma-4/Transformers/gemma-4-31b-it; found {configs}")
+    # lora_data.py reads the jsonl files next to it, so link everything into one folder.
+    data_dir = Path("/tmp/lora")
+    kit = kaggle_input(KIT.split("/")[1])
+    for name in KIT_FILES:
+        link = data_dir / name
+        if not link.exists():
+            source = next(kit.rglob(name), None)
+            if source is None:
+                raise SystemExit(f"Attach the {KIT} dataset; {name} is missing.")
+            link.parent.mkdir(parents=True, exist_ok=True)
+            link.symlink_to(source)
+    sample = data_dir / SAMPLE_ADAPTER
+    if not sample.exists():
+        sample.parent.mkdir(parents=True, exist_ok=True)
+        sample.symlink_to(kaggle_input(COMPETITION) / SAMPLE_ADAPTER)
+    return configs[0].parent, data_dir
+
+
+def resume_from_inputs(output_dir: Path) -> None:
+    """A Kaggle session cannot see the previous one, unless its output is attached as input."""
+    from kaggle_ws import find_kaggle_inputs
+
+    if (output_dir / "checkpoint.pt").exists():
+        return
+    found = find_kaggle_inputs(f"{EXP}/checkpoint.pt")
+    if found:
+        print(f"copying the previous run from {found[0].parent}", flush=True)
+        shutil.copytree(found[0].parent, output_dir, dirs_exist_ok=True)
 
 
 def prepare_colab(data_root: Path) -> tuple[Path, Path]:
     """Check the machine, then install packages and download only what training needs."""
-    if not torch.cuda.is_available():
-        raise SystemExit("No GPU: select an A100 runtime.")
-    gpu = torch.cuda.get_device_properties(0)
-    gpu_gib = gpu.total_memory / 2**30
+    check_gpus()
     disk_gib = shutil.disk_usage("/content").free / 2**30
-    print(f"GPU: {gpu.name} {gpu_gib:.0f} GiB; free disk: {disk_gib:.0f} GiB", flush=True)
-    if gpu_gib < MIN_GPU_GIB:
-        raise SystemExit(f"{gpu.name} is too small for the nf4 model: select an A100 runtime.")
+    print(f"free disk: {disk_gib:.0f} GiB", flush=True)
     model_dir = Path("/content/model")
     if not (model_dir / "config.json").exists() and disk_gib < MIN_DISK_GIB:
         raise SystemExit(f"The checkpoint needs about 63 GB of disk; {disk_gib:.0f} GiB is free.")
@@ -115,9 +169,14 @@ def load_model(model_dir: Path):
         bnb_4bit_compute_dtype=torch.bfloat16,
         bnb_4bit_use_double_quant=True,
     )
+    # Split across GPUs only when needed: the layers then run one GPU at a time.
+    device_map = {"": 0} if max(gpu_gibs()) >= MIN_GPU_GIB else "balanced"
     model = AutoModelForCausalLM.from_pretrained(
-        model_dir, quantization_config=quantization, device_map={"": 0}
+        model_dir, quantization_config=quantization, device_map=device_map
     )
+    if device_map == "balanced":
+        devices = sorted({str(d) for d in model.hf_device_map.values()})
+        print(f"model split across {devices}", flush=True)
     model.gradient_checkpointing_enable(gradient_checkpointing_kwargs={"use_reentrant": False})
     return model
 
@@ -220,9 +279,20 @@ def save_adapter(wrapped: dict[str, LoraLinear], directory: Path) -> None:
 
 
 def peak_gib() -> float:
-    if not torch.cuda.is_available():
-        return 0.0
-    return torch.cuda.max_memory_allocated() / 2**30
+    """The highest peak of any GPU."""
+    count = torch.cuda.device_count()
+    return max((torch.cuda.max_memory_allocated(i) / 2**30 for i in range(count)), default=0.0)
+
+
+def reset_peaks() -> None:
+    for i in range(torch.cuda.device_count()):
+        torch.cuda.reset_peak_memory_stats(i)
+
+
+def free_cache() -> None:
+    for i in range(torch.cuda.device_count()):
+        with torch.cuda.device(i):
+            torch.cuda.empty_cache()
 
 
 def step_loss(model, step):
@@ -249,8 +319,7 @@ def smoke(model, train, params, optimizer) -> None:
     for goal in SMOKE_LENGTHS:
         step = min(by_length, key=lambda s: abs(len(s["prompt"]) + len(s["target"]) - goal))
         size = len(step["prompt"]) + len(step["target"])
-        if torch.cuda.is_available():
-            torch.cuda.reset_peak_memory_stats()
+        reset_peaks()
         begin = time.time()
         loss, _ = step_loss(model, step)
         loss.backward()
@@ -274,11 +343,15 @@ def main() -> None:
     args = parser.parse_args()
 
     if args.output_dir is None or args.model_dir is None:
-        from kaggle_ws import get_paths
+        from kaggle_ws import get_paths, is_kaggle
 
         paths = get_paths(COMPETITION)
         args.output_dir = args.output_dir or paths.output / EXP
-        if args.model_dir is None:
+        if is_kaggle():
+            resume_from_inputs(args.output_dir)
+        if args.model_dir is None and is_kaggle():
+            args.model_dir, args.data_dir = prepare_kaggle()
+        elif args.model_dir is None:
             args.model_dir, args.data_dir = prepare_colab(paths.data)
 
     random.seed(SEED)
@@ -383,7 +456,7 @@ def main() -> None:
                 seen += 1
             except torch.cuda.OutOfMemoryError:
                 skipped += 1
-                torch.cuda.empty_cache()
+                free_cache()
                 print(f"skipped a step after OOM (total {skipped})", flush=True)
         if seen == 0:
             raise SystemExit(f"Every step of update {update + 1} ran out of memory: GPU too small.")
