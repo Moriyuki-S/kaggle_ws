@@ -80,6 +80,9 @@ OFFLINE_ENV = "kaggle-ws-eval-wheels"
 QAT_MIRROR = "gemma-4-31b-w4a16-ct-mirror"
 QAT_BYTES = 23_265_352_448
 PORT = 8000
+# Warming up vLLM's default of 256 sequences ran out of memory on 4x L4; the agents send only
+# a few requests at a time. This changes scheduling, not the outputs.
+MAX_NUM_SEQS = 32
 SERVER_TIMEOUT_SECONDS = 1800
 POLL_SECONDS = 30
 GOLD_BATCH = 8
@@ -316,6 +319,7 @@ def start_server(
         "--reasoning-config",
         json.dumps({"reasoning_start_str": "<|channel>", "reasoning_end_str": "<channel|>"}),
         "--no-scheduler-reserve-full-isl",
+        "--max-num-seqs", MAX_NUM_SEQS,
     ]  # fmt: skip
     if adapters:
         rank = max(adapter_rank(path) for path in adapters.values())
@@ -328,6 +332,10 @@ def start_server(
     while time.time() < deadline:
         if server.poll() is not None:
             raise SystemExit(f"vLLM exited with {server.returncode}:\n{log.read_text()[-3000:]}")
+        # with tensor parallelism, the API server can keep running after its engine died
+        if "Worker failed with error" in log.read_text(errors="replace"):
+            server.terminate()
+            raise SystemExit(f"vLLM failed to start:\n{log.read_text()[-3000:]}")
         try:
             urllib.request.urlopen(f"http://127.0.0.1:{PORT}/health", timeout=5)
             print("vLLM is ready", flush=True)
@@ -595,7 +603,7 @@ def main() -> None:
 
     for exp in exps:
         (root / exp).mkdir(parents=True, exist_ok=True)
-    server = start_server(server_python, model_dir, model, adapters, WORK / "vllm.log", gpus)
+    server = start_server(server_python, model_dir, model, adapters, root / "vllm.log", gpus)
     try:
         for exp in exps:
             evaluate_experiment(eval_python, exp, sample, paths.data, root / exp, args)
