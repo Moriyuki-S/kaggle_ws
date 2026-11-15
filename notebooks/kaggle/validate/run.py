@@ -13,7 +13,7 @@ import sys
 from pathlib import Path
 
 COMPETITION = "gemma-4-developer-agent"
-ARGS = "--exps exp001,exp005 --num-tasks 2"  # the first is the baseline; drop --num-tasks for 30
+ARGS = "--exps exp001,exp003,exp005"  # the first is the baseline; drop --num-tasks for 30
 REPO_DIR = "/tmp/kaggle_ws"
 
 # 4x L4 runs without internet, so the code comes from the kaggle-ws-code dataset.

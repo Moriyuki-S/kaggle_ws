@@ -13,7 +13,7 @@
     "hotcoffee012/kaggle-ws-eval-wheels",
     "metric/gemma-4-developer-agent-wheelhouse"
   ],
-  "kernel_sources": [],
+  "kernel_sources": ["hotcoffee012/gemma-4-lora-train", "hotcoffee012/gemma-4-validate"],
   "competition_sources": [
     "gemma-4-developer-agent"
   ],
