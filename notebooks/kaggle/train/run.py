@@ -13,7 +13,7 @@ from pathlib import Path
 
 COMPETITION = "gemma-4-developer-agent"
 EXP = "exp003"
-ARGS = "--smoke"  # "--smoke" measures speed and memory; "" trains
+ARGS = "--time-limit-hours 10.5"  # "--smoke" measures speed and memory; Kaggle stops a session at 12 h
 REPO_DIR = "/tmp/kaggle_ws"
 
 # 4x L4 runs without internet, so the code comes from the kaggle-ws-code dataset.
