@@ -8,6 +8,7 @@ Adapters come from attached inputs that hold <exp>/<adapter>/, such as the train
 
 import os
 import shlex
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -24,8 +25,8 @@ archive = next(dataset.rglob("kaggle_ws.tar"), None)
 if archive is not None:
     os.makedirs(REPO_DIR, exist_ok=True)
     subprocess.run(["tar", "-xf", str(archive), "-C", REPO_DIR], check=True)
-else:  # Kaggle unpacked the archive
-    REPO_DIR = str(next(dataset.rglob("src/kaggle_ws")).parents[1])
+else:  # Kaggle unpacked the archive into the read-only input; copy it to write next to the code
+    shutil.copytree(next(dataset.rglob("src/kaggle_ws")).parents[1], REPO_DIR, dirs_exist_ok=True)
 print("code at commit", next(dataset.rglob("COMMIT")).read_text().strip(), flush=True)
 
 # kaggle_ws is used from source: installing the repo would replace Kaggle's torch.
