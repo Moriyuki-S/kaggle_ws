@@ -22,9 +22,15 @@ New experiment: `scripts/new_exp.sh gemma-4-developer-agent` (copies the latest 
 
 | exp | description | CV | Public LB | notes |
 |-----|-------------|----|-----------|-------|
-| exp001 | 31B single agent, no LoRA, no graph tools, 8 min / 28 calls | | | |
+| exp001 | 31B single agent, no LoRA, no graph tools, 8 min / 28 calls | 8/30 | | 409 s/task, over the ~350 s budget |
 | exp002 | Kaggle L4x4 memory and speed test for LoRA training (bf16); 12k context ran out of memory | | | smoke only |
-| exp003 | Colab LoRA training (nf4, r=16, alpha=16, native + external A) | | | |
+| exp003 | LoRA (nf4, r=16, alpha=16, native + external A, 6144 context) on exp001's config | 7/30 | | val_nll 0.471 to 0.361; 7 tasks hit the 80-turn limit |
+| exp005 | exp001 with a 5 min cap and a prompt that edits early | 7/30 | | 277 s/task; 18 tasks hit the time limit |
+| exp007 | LoRA on clean edit steps (native, external A and B; 8192 context, histories trimmed) on exp005's config | | | targets edit_file calls that lose old_string |
+
+CV: `validate.py`, 30 public tasks (seed 42) on Kaggle 4x L4, tasks on Python 3.12. About a third of
+edit_file calls in exp001 and exp005 lost `old_string`: tool results reach the model JSON-escaped, it
+writes `\n` in new_string, and the broken string swallows the next argument.
 
 ## Setup
 

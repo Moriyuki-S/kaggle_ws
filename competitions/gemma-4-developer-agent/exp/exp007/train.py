@@ -1,0 +1,631 @@
+"""Train a LoRA adapter for Gemma 4 31B that writes edit_file and write_file calls cleanly.
+
+Gemma 4 writes tool arguments between <|"|> delimiters, where code needs no escaping. ADK returns
+tool results as JSON strings, so the model reads file contents with escaped newlines and copies the
+style: about a third of its edit_file calls lost old_string when a backslash-escaped new_string
+broke the delimiter (exp001/exp005 validation). exp003 hardly trained on edits: 51 of 343 native
+edit and write calls fit its 6144-token context, and its native data itself holds such broken calls.
+
+This experiment trains on edit steps first: steps whose tool calls are all well formed, with code
+written raw, from the native, external_A and external_B tiers. Long histories keep the system
+prompt and issue and drop the oldest tool calls, so that late edit steps fit the context.
+
+The checkpoint is loaded in nf4: on one GPU of 30 GiB or more (Colab A100), or split layer by
+layer across several smaller ones (Kaggle 4x L4). The adapter is served later on the official
+QAT checkpoint through vLLM. Progress is checkpointed so a new session can resume.
+
+Run through notebooks/colab_runner.ipynb (downloads only the files it needs) or
+notebooks/kaggle/train (reads the attached Kaggle inputs).
+
+Data: dmitriigluzdov/gemma-4-serving-and-lora-verification-kit (CC BY 4.0).
+"""
+
+import argparse
+import json
+import math
+import os
+import random
+import re
+import shutil
+import struct
+import subprocess
+import sys
+import time
+from pathlib import Path
+
+import torch
+import torch.nn.functional as F
+from safetensors.torch import save_file
+from torch import nn
+
+SEED = 42
+R = 16
+ALPHA = 16
+TARGET_MODULES = ("q_proj", "k_proj", "v_proj", "o_proj")
+TIERS = ("native", "external_A", "external_B")
+LEARNING_RATE = 1e-4
+GRAD_ACCUM = 8
+WARMUP_STEPS = 5
+CHECKPOINT_EVERY = 5
+EVAL_EVERY = 25
+VAL_REPO_FRACTION = 0.1
+MAX_VAL_STEPS = 16
+EDIT_SHARE = 0.6  # edit or write steps among the training steps; the rest are native steps
+CODE_KEYS = {
+    "edit_file": ("filepath", "new_string", "old_string"),
+    "write_file": ("content", "filepath"),
+}
+TOOL_CALL_RE = re.compile(r"<\|tool_call>call:(\w+)\{(.*?)\}<tool_call\|>", re.DOTALL)
+STRING_ARG_RE = re.compile(r'(\w+):<\|"\|>(.*?)<\|"\|>', re.DOTALL)
+MODEL_TURN = "<|turn>model\n"
+SCRATCH_PREFIXES = ("repro", "test_", "debug", "check", "verify", "demo", "tmp")
+SMOKE_LENGTHS = (3072, 4096, 5120, 6144, 8192)
+
+SERVED_MODEL = "gemma-4-31b-it-qat-w4a16-ct"
+KEY_PREFIX = "base_model.model.model.language_model."
+LAYER_RE = re.compile(r"layers\.(\d+)\.self_attn\.([qkvo]_proj)$")
+
+
+EXP_DIR = Path(__file__).resolve().parent
+EXP = EXP_DIR.name
+COMPETITION = EXP_DIR.parents[1].name
+KIT = "dmitriigluzdov/gemma-4-serving-and-lora-verification-kit"
+KIT_FILES = (
+    "lora_data.py",
+    "lora_native_resolved.jsonl",
+    "lora_external_A.jsonl",
+    *(f"lora_external_B.part{i:03d}.jsonl" for i in range(4)),
+)
+SAMPLE_ADAPTER = "sample_submission/adapters/main_lora/adapter_model.safetensors"
+PACKAGES = ("transformers==5.13.1", "bitsandbytes", "accelerate", "huggingface_hub", "six")
+# A single GPU needs this much; smaller GPUs need this much in total, as the model is split.
+MIN_GPU_GIB = 30
+MIN_DISK_GIB = 75
+KAGGLE_MODEL = "gemma-4"  # google/gemma-4/Transformers/gemma-4-31b-it in kernel-metadata.json
+# Kaggle 4x L4 has no internet: these come from the competition's wheelhouse dataset instead.
+WHEELHOUSE = "gemma-4-developer-agent-wheelhouse"
+WHEELHOUSE_PACKAGES = ("transformers", "tokenizers", "safetensors", "bitsandbytes")
+
+
+def gpu_gibs() -> list[float]:
+    count = torch.cuda.device_count()
+    return [torch.cuda.get_device_properties(i).total_memory / 2**30 for i in range(count)]
+
+
+def check_gpus() -> None:
+    gibs = gpu_gibs()
+    if not gibs:
+        raise SystemExit("No GPU: select a Colab A100 or a Kaggle L4x4 machine.")
+    name = torch.cuda.get_device_properties(0).name
+    print(f"GPU: {len(gibs)}x {name} {min(gibs):.0f} GiB", flush=True)
+    if max(gibs) < MIN_GPU_GIB and sum(gibs) < 2 * MIN_GPU_GIB:
+        raise SystemExit(f"{len(gibs)}x {name} is too small for the nf4 model.")
+
+
+def prepare_kaggle() -> tuple[Path, Path]:
+    """Install packages offline and gather the attached inputs (notebooks/kaggle/train)."""
+    from kaggle_ws import kaggle_input
+
+    check_gpus()
+    if os.environ.get("WHEELHOUSE_INSTALLED") != "1":
+        wheels = [
+            wheel
+            for name in WHEELHOUSE_PACKAGES
+            for wheel in sorted(kaggle_input(WHEELHOUSE).rglob(f"{name}-*.whl"))
+        ]
+        if len(wheels) != len(WHEELHOUSE_PACKAGES):
+            raise SystemExit(f"Attach metric/{WHEELHOUSE}; found {wheels}")
+        command = [sys.executable, "-m", "pip", "install", "-q", "--no-deps", *map(str, wheels)]
+        subprocess.run(command, check=True)
+        # safetensors is already imported at its old version: start again with the new ones.
+        os.environ["WHEELHOUSE_INSTALLED"] = "1"
+        os.execv(sys.executable, [sys.executable, *sys.argv])
+    configs = sorted(kaggle_input(KAGGLE_MODEL).rglob("config.json"))
+    configs = [p for p in configs if "gemma-4-31b-it" in str(p) and "qat" not in str(p)]
+    if len(configs) != 1:
+        raise SystemExit(f"Attach google/gemma-4/Transformers/gemma-4-31b-it; found {configs}")
+    # lora_data.py reads the jsonl files next to it, so link everything into one folder.
+    data_dir = Path("/tmp/lora")
+    kit = kaggle_input(KIT.split("/")[1])
+    for name in KIT_FILES:
+        link = data_dir / name
+        if not link.exists():
+            source = next(kit.rglob(name), None)
+            if source is None:
+                raise SystemExit(f"Attach the {KIT} dataset; {name} is missing.")
+            link.parent.mkdir(parents=True, exist_ok=True)
+            link.symlink_to(source)
+    sample = data_dir / SAMPLE_ADAPTER
+    if not sample.exists():
+        sample.parent.mkdir(parents=True, exist_ok=True)
+        sample.symlink_to(kaggle_input(COMPETITION) / SAMPLE_ADAPTER)
+    return configs[0].parent, data_dir
+
+
+def resume_from_inputs(output_dir: Path) -> None:
+    """A Kaggle session cannot see the previous one, unless its output is attached as input."""
+    from kaggle_ws import find_kaggle_inputs
+
+    if (output_dir / "checkpoint.pt").exists():
+        return
+    found = find_kaggle_inputs(f"{EXP}/checkpoint.pt")
+    if found:
+        print(f"copying the previous run from {found[0].parent}", flush=True)
+        shutil.copytree(found[0].parent, output_dir, dirs_exist_ok=True)
+
+
+def prepare_colab(data_root: Path) -> tuple[Path, Path]:
+    """Check the machine, then install packages and download only what training needs."""
+    check_gpus()
+    disk_gib = shutil.disk_usage("/content").free / 2**30
+    print(f"free disk: {disk_gib:.0f} GiB", flush=True)
+    model_dir = Path("/content/model")
+    if not (model_dir / "config.json").exists() and disk_gib < MIN_DISK_GIB:
+        raise SystemExit(f"The checkpoint needs about 63 GB of disk; {disk_gib:.0f} GiB is free.")
+
+    subprocess.run([sys.executable, "-m", "pip", "install", "-q", *PACKAGES], check=True)
+    from huggingface_hub import snapshot_download
+
+    snapshot_download(
+        "google/gemma-4-31b-it",
+        allow_patterns=["*.json", "*.jinja", "*.safetensors"],
+        local_dir=model_dir,
+    )
+    data_dir = data_root / "lora"
+    data_dir.mkdir(parents=True, exist_ok=True)
+    for name in KIT_FILES:
+        if not (data_dir / name).exists():
+            command = ["kaggle", "datasets", "download", KIT, "-f", name, "-p", data_dir, "-q"]
+            subprocess.run([str(part) for part in command], check=True)
+    if not any(data_dir.rglob("adapter_model.safetensors")):
+        command = ["kaggle", "competitions", "download", COMPETITION]
+        command += ["-f", SAMPLE_ADAPTER, "-p", str(data_dir), "-q"]
+        subprocess.run(command, check=True)
+    return model_dir, data_dir
+
+
+class LoraLinear(nn.Module):
+    def __init__(self, base: nn.Linear):
+        super().__init__()
+        self.base = base
+        device = base.weight.device
+        self.lora_A = nn.Parameter(torch.empty(R, base.in_features, device=device))
+        self.lora_B = nn.Parameter(torch.zeros(base.out_features, R, device=device))
+        nn.init.kaiming_uniform_(self.lora_A, a=math.sqrt(5))
+        self.scaling = ALPHA / R
+
+    def forward(self, x):
+        delta = x @ self.lora_A.to(x.dtype).T @ self.lora_B.to(x.dtype).T
+        return self.base(x) + delta * self.scaling
+
+
+def load_model(model_dir: Path):
+    from transformers import AutoModelForCausalLM, BitsAndBytesConfig
+
+    quantization = BitsAndBytesConfig(
+        load_in_4bit=True,
+        bnb_4bit_quant_type="nf4",
+        bnb_4bit_compute_dtype=torch.bfloat16,
+        bnb_4bit_use_double_quant=True,
+    )
+    # Split across GPUs only when needed: the layers then run one GPU at a time.
+    device_map = {"": 0} if max(gpu_gibs()) >= MIN_GPU_GIB else "balanced"
+    model = AutoModelForCausalLM.from_pretrained(
+        model_dir, quantization_config=quantization, device_map=device_map
+    )
+    if device_map == "balanced":
+        devices = sorted({str(d) for d in model.hf_device_map.values()})
+        print(f"model split across {devices}", flush=True)
+    model.gradient_checkpointing_enable(gradient_checkpointing_kwargs={"use_reentrant": False})
+    return model
+
+
+def is_scratch(filepath: str) -> bool:
+    name = filepath.rsplit("/", 1)[-1]
+    return "/" not in filepath.strip("/") or name.startswith(SCRATCH_PREFIXES)
+
+
+def check_calls(completion: str) -> tuple[bool, bool, bool]:
+    """(well formed, edits or writes, has a backslash in its code) for one assistant turn."""
+    if completion.count("<|tool_call>") != completion.count("<tool_call|>"):
+        return False, False, False
+    edits, backslash = False, False
+    for name, body in TOOL_CALL_RE.findall(completion):
+        if name not in CODE_KEYS:
+            continue
+        args = dict(STRING_ARG_RE.findall(body))
+        if tuple(sorted(args)) != CODE_KEYS[name]:
+            return False, False, False  # a missing argument: the failure this experiment targets
+        if name == "write_file" and is_scratch(args["filepath"]):
+            return False, False, False  # the prompt asks to keep scratch files out of /workspace
+        for key in ("new_string", "old_string", "content"):
+            value = args.get(key, "")
+            if "\\n" in value and "\n" not in value:
+                return False, False, False  # newlines written as \\n instead of real ones
+            backslash |= "\\" in value
+        edits = True
+    return True, edits, backslash
+
+
+def fit_prompt(prompt: str, tokenizer, budget: int) -> list[int] | None:
+    """Keep the system prompt and issue, then the latest tool calls that fit in budget tokens."""
+    ids = tokenizer(prompt, add_special_tokens=False)["input_ids"]
+    if len(ids) <= budget:
+        return ids
+    head_end = prompt.find(MODEL_TURN)
+    if head_end < 0:
+        return None
+    head_end += len(MODEL_TURN)
+    head = tokenizer(prompt[:head_end], add_special_tokens=False)["input_ids"]
+    cuts = [
+        m.start() for m in re.finditer(re.escape("<|tool_call>"), prompt) if m.start() >= head_end
+    ]
+    low, high, best = 0, len(cuts) - 1, None
+    while low <= high:  # the earliest cut whose tail still fits
+        middle = (low + high) // 2
+        tail = tokenizer(prompt[cuts[middle] :], add_special_tokens=False)["input_ids"]
+        if len(head) + len(tail) <= budget:
+            best, high = head + tail, middle - 1
+        else:
+            low = middle + 1
+    return best
+
+
+def load_steps(model_dir: Path, data_dir: Path, max_context: int, max_train: int):
+    """Clean edit steps from every tier, topped up with clean native steps."""
+    from transformers import AutoTokenizer
+
+    sys.path.insert(0, str(next(data_dir.rglob("lora_data.py")).parent))
+    from lora_data import iter_steps
+
+    tokenizer = AutoTokenizer.from_pretrained(model_dir)
+    root = next(data_dir.rglob("lora_data.py")).parent
+    edits, others, rejected = [], [], 0
+    for step in iter_steps(root, tiers=TIERS, max_context_tokens=10**9):
+        target = step["completion_token_ids"]
+        if not target or len(target) > max_context // 2:
+            continue
+        well_formed, edit, backslash = check_calls(step["completion"])
+        if not well_formed:
+            rejected += 1
+            continue
+        if not edit and step["tier"] != "native":
+            continue
+        item = {
+            "text": step["prompt"],
+            "ids": step.get("prompt_token_ids"),
+            "target": target,
+            "repo": step["issue"].rsplit("-", 1)[0],
+            "tier": step["tier"],
+            "edit": edit,
+            "backslash": backslash,
+        }
+        (edits if edit else others).append(item)
+    print(f"candidates: {len(edits)} edit steps, {len(others)} other native steps, "
+          f"{rejected} rejected as malformed", flush=True)  # fmt: skip
+
+    rng = random.Random(SEED)
+    rng.shuffle(edits)
+    rng.shuffle(others)
+    # half from the served model's own runs, half from the cleaner external ones; code with
+    # backslashes first, as that is where the delimiter breaks
+    edits.sort(key=lambda s: not s["backslash"])
+    native = [s for s in edits if s["tier"] == "native"]
+    external = [s for s in edits if s["tier"] != "native"]
+    n_edit = int(max_train * EDIT_SHARE)
+    half = n_edit // 2 + MAX_VAL_STEPS * 2
+    edits = native[:half] + external[: n_edit + MAX_VAL_STEPS * 4 - min(half, len(native))]
+    chosen = edits + others[: max_train - n_edit + MAX_VAL_STEPS * 4]
+    steps = []
+    for item in chosen:
+        budget = max_context - len(item["target"])
+        ids = item["ids"] if item["ids"] and len(item["ids"]) <= budget else None
+        ids = ids or fit_prompt(item["text"], tokenizer, budget)
+        if ids is None:
+            continue
+        steps.append({**item, "prompt": ids, "text": None, "ids": None})
+    return steps
+
+
+def split_by_repo(steps, max_train: int):
+    repos = sorted({s["repo"] for s in steps if s["tier"] == "native" and s["edit"]})
+    random.Random(SEED).shuffle(repos)
+    held_out = set(repos[: max(1, int(len(repos) * VAL_REPO_FRACTION))])
+    train = [s for s in steps if s["repo"] not in held_out]
+    # validation on edit steps: they decide whether the adapter fixed the broken calls
+    val = [s for s in steps if s["repo"] in held_out and s["edit"]]
+    n_edit = int(max_train * EDIT_SHARE)
+    train = [s for s in train if s["edit"]][:n_edit] + [s for s in train if not s["edit"]]
+    train = train[:max_train]
+    random.Random(SEED).shuffle(train)
+    # The shortest steps keep validation within memory on a 22 GiB GPU, where an OOM would be fatal.
+    val.sort(key=lambda s: len(s["prompt"]) + len(s["target"]))
+    return train, val[:MAX_VAL_STEPS]
+
+
+def wrap_modules(model) -> dict[str, LoraLinear]:
+    wrapped: dict[str, LoraLinear] = {}
+    for name, module in list(model.named_modules()):
+        match = LAYER_RE.search(name)
+        if not match or "vision" in name or "audio" in name or not isinstance(module, nn.Linear):
+            continue
+        parent = model.get_submodule(name.rsplit(".", 1)[0])
+        lora = LoraLinear(module)
+        setattr(parent, match.group(2), lora)
+        wrapped[f"layers.{match.group(1)}.self_attn.{match.group(2)}"] = lora
+    if not wrapped:
+        raise RuntimeError("no target modules found")
+    return wrapped
+
+
+def check_against_sample(wrapped: dict[str, LoraLinear], data_dir: Path) -> None:
+    """The official sample adapter fixes tensor names and feature sizes that vLLM expects."""
+    path = next(data_dir.rglob("adapter_model.safetensors"))
+    with open(path, "rb") as f:
+        size = struct.unpack("<Q", f.read(8))[0]
+        header = json.loads(f.read(size))
+    for key, info in header.items():
+        if key == "__metadata__":
+            continue
+        layer, kind = key.removeprefix(KEY_PREFIX).rsplit(".", 2)[:2]
+        axis = 0 if kind == "lora_B" else 1
+        actual = getattr(wrapped[layer], kind).shape[axis]
+        if actual != info["shape"][axis]:
+            raise RuntimeError(f"{key}: sample {info['shape']}, model has size {actual}")
+
+
+def save_adapter(wrapped: dict[str, LoraLinear], directory: Path) -> None:
+    directory.mkdir(parents=True, exist_ok=True)
+    tensors = {}
+    for layer, lora in wrapped.items():
+        for kind in ("lora_A", "lora_B"):
+            value = getattr(lora, kind).detach().to("cpu", torch.bfloat16).clone()
+            tensors[f"{KEY_PREFIX}{layer}.{kind}.weight"] = value
+    save_file(tensors, directory / "adapter_model.safetensors")
+    config = {
+        "base_model_name_or_path": f"google/{SERVED_MODEL}",
+        "bias": "none",
+        "fan_in_fan_out": False,
+        "inference_mode": True,
+        "init_lora_weights": True,
+        "lora_alpha": ALPHA,
+        "lora_dropout": 0.0,
+        "modules_to_save": None,
+        "peft_type": "LORA",
+        "r": R,
+        "target_modules": list(TARGET_MODULES),
+        "task_type": "CAUSAL_LM",
+        "use_dora": False,
+        "use_rslora": False,
+    }
+    (directory / "adapter_config.json").write_text(json.dumps(config, indent=2))
+
+
+def peak_gib() -> float:
+    """The highest peak of any GPU."""
+    count = torch.cuda.device_count()
+    return max((torch.cuda.max_memory_allocated(i) / 2**30 for i in range(count)), default=0.0)
+
+
+def reset_peaks() -> None:
+    for i in range(torch.cuda.device_count()):
+        torch.cuda.reset_peak_memory_stats(i)
+
+
+def free_cache() -> None:
+    for i in range(torch.cuda.device_count()):
+        with torch.cuda.device(i):
+            torch.cuda.empty_cache()
+
+
+def step_loss(model, step):
+    device = model.get_input_embeddings().weight.device
+    input_ids = torch.tensor([step["prompt"] + step["target"]], device=device)
+    n = len(step["target"])
+    logits = model(input_ids=input_ids, logits_to_keep=n + 1).logits[0, :-1]
+    labels = torch.tensor(step["target"], device=logits.device)
+    return F.cross_entropy(logits.float(), labels), n
+
+
+@torch.no_grad()
+def evaluate(model, subset) -> float:
+    total, count = 0.0, 0
+    for step in subset:
+        loss, n = step_loss(model, step)
+        total += loss.item() * n
+        count += n
+    return total / max(count, 1)
+
+
+def smoke(model, train, params, optimizer) -> None:
+    by_length = sorted(train, key=lambda s: len(s["prompt"]) + len(s["target"]))
+    for goal in SMOKE_LENGTHS:
+        step = min(by_length, key=lambda s: abs(len(s["prompt"]) + len(s["target"]) - goal))
+        size = len(step["prompt"]) + len(step["target"])
+        reset_peaks()
+        begin = time.time()
+        loss, _ = step_loss(model, step)
+        loss.backward()
+        print(
+            f"smoke length={size} loss={loss.item():.4f} "
+            f"seconds={time.time() - begin:.1f} peak_gib={peak_gib():.1f}",
+            flush=True,
+        )
+        optimizer.zero_grad(set_to_none=True)
+    print("smoke finished; no adapter was trained", flush=True)
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--model-dir", type=Path, help="Skips setup when given with --data-dir.")
+    parser.add_argument("--data-dir", type=Path)
+    parser.add_argument("--output-dir", type=Path)
+    parser.add_argument("--max-context", type=int, default=8192)
+    parser.add_argument("--max-train-steps", type=int, default=400, help="about 9 h on 4x L4")
+    parser.add_argument("--time-limit-hours", type=float, default=10.0)
+    parser.add_argument("--smoke", action="store_true")
+    args = parser.parse_args()
+
+    if args.output_dir is None or args.model_dir is None:
+        from kaggle_ws import get_paths, is_kaggle
+
+        paths = get_paths(COMPETITION)
+        args.output_dir = args.output_dir or paths.output / EXP
+        if is_kaggle():
+            resume_from_inputs(args.output_dir)
+        if args.model_dir is None and is_kaggle():
+            args.model_dir, args.data_dir = prepare_kaggle()
+        elif args.model_dir is None:
+            args.model_dir, args.data_dir = prepare_colab(paths.data)
+
+    random.seed(SEED)
+    torch.manual_seed(SEED)
+    started = time.time()
+    deadline = started + args.time_limit_hours * 3600
+    os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
+    args.output_dir.mkdir(parents=True, exist_ok=True)
+    checkpoint_path = args.output_dir / "checkpoint.pt"
+
+    context = 8192 if args.smoke else args.max_context
+    steps = load_steps(args.model_dir, args.data_dir, context, args.max_train_steps)
+    train, val = split_by_repo(steps, args.max_train_steps)
+    longest_val = max((len(s["prompt"]) + len(s["target"]) for s in val), default=0)
+    print(f"steps: {len(steps)} train={len(train)} val={len(val)}", flush=True)
+    for name, subset in (("train", train), ("val", val)):
+        tiers = {t: sum(s["tier"] == t for s in subset) for t in TIERS}
+        edit = sum(s["edit"] for s in subset)
+        backslash = sum(s["backslash"] for s in subset)
+        print(f"{name}: {tiers} edit={edit} backslash={backslash}", flush=True)
+    print(f"longest validation step: {longest_val} tokens", flush=True)
+
+    model = load_model(args.model_dir)
+    model.requires_grad_(False)
+    model.config.use_cache = False
+    model.train()
+    print(f"{type(model).__name__} loaded at {time.time() - started:.0f}s", flush=True)
+    print(f"peak after load: {peak_gib():.1f} GiB", flush=True)
+
+    wrapped = wrap_modules(model)
+    check_against_sample(wrapped, args.data_dir)
+    print(f"wrapped {len(wrapped)} modules", flush=True)
+    params = [p for lora in wrapped.values() for p in (lora.lora_A, lora.lora_B)]
+    optimizer = torch.optim.AdamW(params, lr=LEARNING_RATE, weight_decay=0.0)
+
+    if args.smoke:
+        smoke(model, train, params, optimizer)
+        return
+
+    total_updates = max(1, len(train) // GRAD_ACCUM)
+
+    def lr_at(update: int) -> float:
+        if update < WARMUP_STEPS:
+            return (update + 1) / WARMUP_STEPS
+        progress = (update - WARMUP_STEPS) / max(1, total_updates - WARMUP_STEPS)
+        return 0.5 * (1 + math.cos(math.pi * min(progress, 1.0)))
+
+    update, skipped, history, best = 0, 0, [], None
+    state = None
+    if checkpoint_path.exists():
+        state = torch.load(checkpoint_path, map_location="cpu", weights_only=False)
+        if state["skipped"] >= state["update"] * GRAD_ACCUM:
+            print("ignoring a checkpoint in which every step was skipped", flush=True)
+            state = None
+    if state is not None:
+        if state["max_context"] != args.max_context:
+            raise ValueError(f"checkpoint used max_context={state['max_context']}")
+        for param, saved in zip(params, state["params"], strict=True):
+            param.data.copy_(saved.to(param.device))
+        optimizer.load_state_dict(state["optimizer"])
+        update, skipped = state["update"], state["skipped"]
+        history, best = state["history"], state["best"]
+        print(f"resumed at update {update}/{total_updates}", flush=True)
+
+    def write_checkpoint() -> None:
+        state = {
+            "max_context": args.max_context,
+            "params": [p.detach().cpu() for p in params],
+            "optimizer": optimizer.state_dict(),
+            "update": update,
+            "skipped": skipped,
+            "history": history,
+            "best": best,
+        }
+        temporary = checkpoint_path.with_suffix(".tmp")
+        torch.save(state, temporary)
+        temporary.replace(checkpoint_path)
+
+    def write_metrics() -> None:
+        metrics = {
+            "max_context": args.max_context,
+            "train_steps": len(train),
+            "val_steps": len(val),
+            "total_updates": total_updates,
+            "updates": update,
+            "skipped_steps": skipped,
+            "best_val_nll": best,
+            "history": history,
+            "config": {
+                "r": R,
+                "alpha": ALPHA,
+                "lr": LEARNING_RATE,
+                "tiers": list(TIERS),
+                "edit_share": EDIT_SHARE,
+            },
+        }
+        (args.output_dir / "metrics.json").write_text(json.dumps(metrics, indent=2))
+
+    if best is None:
+        best = evaluate(model, val)
+        history.append({"update": 0, "val_nll": best})
+        print(f"baseline val_nll={best:.4f} ({time.time() - started:.0f}s)", flush=True)
+
+    while update < total_updates and time.time() < deadline:
+        batch = train[update * GRAD_ACCUM : (update + 1) * GRAD_ACCUM]
+        begin = time.time()
+        running, seen = 0.0, 0
+        for step in batch:
+            try:
+                loss, _ = step_loss(model, step)
+                (loss / len(batch)).backward()
+                running += loss.item()
+                seen += 1
+            except torch.cuda.OutOfMemoryError:
+                skipped += 1
+                free_cache()
+                print(f"skipped a step after OOM (total {skipped})", flush=True)
+        if seen == 0:
+            raise SystemExit(f"Every step of update {update + 1} ran out of memory: GPU too small.")
+        for group in optimizer.param_groups:
+            group["lr"] = LEARNING_RATE * lr_at(update)
+        norm = torch.nn.utils.clip_grad_norm_(params, 1.0).item()
+        optimizer.step()
+        optimizer.zero_grad(set_to_none=True)
+        update += 1
+        print(
+            f"update {update}/{total_updates} loss={running / max(seen, 1):.4f} grad={norm:.3f} "
+            f"s/update={time.time() - begin:.0f} peak_gib={peak_gib():.1f} "
+            f"elapsed={time.time() - started:.0f}s",
+            flush=True,
+        )
+        if update % EVAL_EVERY == 0 or update == total_updates:
+            nll = evaluate(model, val)
+            history.append({"update": update, "val_nll": nll})
+            print(f"val_nll={nll:.4f} (best {best:.4f})", flush=True)
+            if nll < best:
+                best = nll
+                save_adapter(wrapped, args.output_dir / "main_lora")
+        if update % CHECKPOINT_EVERY == 0 or update == total_updates:
+            write_checkpoint()
+            write_metrics()
+
+    write_checkpoint()
+    write_metrics()
+    save_adapter(wrapped, args.output_dir / "main_lora_last")
+    state = (
+        "finished" if update == total_updates else "stopped at the time limit; run again to resume"
+    )
+    print(f"{state}: update {update}/{total_updates}, best val_nll={best:.4f}", flush=True)
+
+
+if __name__ == "__main__":
+    main()

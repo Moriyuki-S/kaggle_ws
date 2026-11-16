@@ -13,7 +13,7 @@ import sys
 from pathlib import Path
 
 COMPETITION = "gemma-4-developer-agent"
-EXP = "exp003"
+EXP = "exp007"
 ARGS = "--time-limit-hours 10.5"  # "--smoke" measures speed and memory; Kaggle stops a session at 12 h
 REPO_DIR = "/tmp/kaggle_ws"
 
